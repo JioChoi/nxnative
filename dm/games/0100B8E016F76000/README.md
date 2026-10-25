@@ -1,8 +1,8 @@
 # NieR:Automata The End of YoRHa Edition (`0100B8E016F76000`)
 
-Base game v0 (display version 1.0.1), SDK 12.3.9. PlatinumGames' engine (the Switch port is Virtuos') on NVN. Modules `main`, `subsdk0` (`NintendoSDK_movie`: the logo movies, VP9 in CRI USM through `movie::Decoder`) and `sdk`. CRI's file system (CPK), Wwise sound, Havok, Enlighten. **Work in progress**: plays on the Mac through the prologue's flight section at 30 fps; not run on the iPhone since the models were fixed (GitHub issue #163).
+Base game v0 (display version 1.0.1), SDK 12.3.9. PlatinumGames' engine (the Switch port is Virtuos') on NVN. Modules `main`, `subsdk0` (`NintendoSDK_movie`: the logo movies, VP9 in CRI USM through `movie::Decoder`) and `sdk`. CRI's file system (CPK), Wwise sound, Havok, Enlighten. Plays well on the Mac at 30 fps from the boot through the prologue's flight section, the factory shaft and the landing to 2B's first fight on foot (Easy); not run on the iPhone since the models were fixed (GitHub issue #163).
 
-On the Mac (fresh save): the boot, the logo movies, the "booting system" screen, the title, a new game (slot 1, the auto-save notice, a name through swkbd, Easy or Normal), the opening text and the prologue's flight-unit section over the sea and in the clouds (shooting, explosions, enemy bullets, HUD, the damage glitch effect), up to a game over. 30 fps as on the Switch. About 2.95 GB of the 3.21 GB pool is mapped at boot and stays there.
+On the Mac (fresh save): the boot, the logo movies, the "booting system" screen, the title, a new game (slot 1, the auto-save notice, a name through swkbd, Easy or Normal), the opening text and the prologue's flight-unit section over the sea and in the clouds (shooting, explosions, enemy bullets, HUD, the damage glitch effect), the factory's side-scrolling and vertical shaft sections, the landing cutscene and 2B's first fight on foot (light / heavy attacks, pod fire, the small machines). 30 fps as on the Switch. About 2.95 GB of the 3.21 GB pool is mapped at boot and stays there.
 
 ## What it needs
 
