@@ -1,0 +1,57 @@
+# Game profile of NieR:Automata The End of YoRHa Edition (Switch, base game v0 = 1.0.1; English, Japanese, French, German, Spanish, Italian, Dutch, Russian, Korean, Simplified and
+# Traditional Chinese). On the Mac from the boot through the logos, the title, a new game (slot, name, difficulty), the opening text and the prologue's flight-unit section
+# (over the sea and in the clouds, shooting, a game over) at 30 fps as on the Switch; not yet run on the iPhone
+# Format: see dm/games/README.md
+# PlatinumGames' engine (the Switch port by Virtuos) on NVN, SDK 12.3.9. Modules main + subsdk0 (NintendoSDK_movie: the logo movies, VP9 in CRI USM through movie::Decoder) + sdk;
+# CRIWARE file system, Wwise sound, Havok, Enlighten.
+# RomFS: 30 CRI CPK archives (6.2 GB, entries CRILAYLA-compressed) of PlatinumGames DAT archives, loose USM movies (3.5 GB) and Wwise streams. The shaders are 1,371 shader
+# files of the engine's older layout (.vso / .pso / .gso / .cso: no magic, a binding table, the code area and the control section), all in five DATs of data000.cpk: shader.dat,
+# shader2.dat, shadereff.dat, shadereffcs.dat and autoshadereff.dat (shader_split.py cpk_jobs, pg_shader_old); 1,225 distinct keys, all build but the 4 geometry shaders
+# (IndexBuildIndependent_{b,x}{cw,ccw}.gso), which Metal cannot express; two of them are bound in the prologue, with no visible effect so far
+
+# ---- Identity ----
+title_id	0100B8E016F76000
+program_id	0100B8E016F76000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID (build_ipa.sh / NSP script)
+name	NieR:Automata The End of YoRHa Edition
+ipa	NieRAutomataTheEndOfYoRHaEdition.ipa
+app_category	public.app-category.action-games
+# full: the camera is on the right stick
+pad_layout	full
+
+# ---- Versions ----
+build	v0	1.0.1	main=c76e3e47492626dc717182b14e6309ca	subsdk0=be1ee79a9968a35a6b63fc8f1036a6d4	sdk=e8cdceb1e77a8465fe20f21928e8d296
+package	v0
+shader_versions	v0
+
+# ---- Files ----
+# load order as on Horizon: main, subsdk*, sdk (subsdk0 = NintendoSDK_movie)
+modules	main subsdk0 sdk
+romfs_marker	data014.cpk
+zip_store	.bnk:.cpk:.usm:.wem:.wsp:.metallib
+
+# ---- Memory ----
+# The NPDM declares 16 MB of system resource (virtual address memory) and main never sets a heap: nninitStartup gives StandardAllocator a 1 MB static block, and the engine
+# maps its memory in the alias region itself. Engage's 5 GB block with a 4.375 GB alias region: within seconds of boot the alias region is used up to +4.05 GB with 2.95 GB of
+# the 3.21 GB pool mapped, and both stay there through the prologue's flight section (no region request failed, so no node-area cut)
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x1000000
+
+# ---- Textures ----
+# The title background (ASTC 6x6 sRGB, 1024x1024) sits in a CPU_UNCACHED | GPU_CACHED pool (flags 0x22) and is filled by the CPU after nvnTextureInitialize: no packaged
+# layout, no WriteTexels, no flush (an uncached pool needs none). Without both keys it read as all-zero ASTC blocks, the error colour: a magenta title screen
+tex_flush_upload	on
+tex_dirty_upload	on
+# FXAA (filter09.pso) samples the RG11B10F scene target it renders into, through a separate texture bind. Metal leaves that undefined: on the Mac some reads came back NaN in
+# red and blue, the bloom spread them into green blobs over the whole picture and the eye adaptation darkened it (DM_NVN_MAGSCAN: 50,000+ non-finite pixels a frame over the
+# opening's ocean; 0 with the snapshot)
+feedback_snap	fd2c47b73f0e7e24
+
+# ---- Shader split (shader_split.py; the shader files in data000.cpk) ----
+shader_groups	#shader.dat/=shader #shader2.dat/=shader2 #shadereff.dat/=effect #shadereffcs.dat/=effect #autoshadereff.dat/=autoeffect
+shader_note	NieR:Automata The End of YoRHa Edition shaders

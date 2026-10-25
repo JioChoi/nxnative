@@ -28,7 +28,8 @@
 #   · data.arc (Super Smash Bros. Ultimate, smash_arc.py): GLSLC outputs in its SSBH shader databases and BNSH in its effects and UI layouts, each of its current files (zstd) scanned, see smash_arc_jobs
 #   · PKZ (PlatinumGames, Bayonetta 3): shader objects (VSO / PSO / CSO / HSO / DSO, a control section and a code area each) in the DAT archives of the PKZ entries (Oodle Kraken, decoded by the
 #       game's own decoder in the Mac host), see pkz_entries, pgdat_members and pg_shader
-#   · CPK (CRI's file system, Bayonetta 2): BNSH files ('.vso' / '.pso') in the PlatinumGames DAT archives of the CPK entries (CRILAYLA entries, cpk.py), see cpk_jobs
+#   · CPK (CRI's file system, Bayonetta 2): BNSH files ('.vso' / '.pso') in the PlatinumGames DAT archives of the CPK entries (CRILAYLA entries, cpk.py), see cpk_jobs; NieR:Automata's
+#       engine keeps its own older shader files there instead (pg_shader_old)
 #   · GFPAK (Game Freak, Pokémon Sword): BNSH entries of the archives under bin/archive (LZ4 entries), see gfpak_members
 #   · .tfxo (Silicon Studio's YEBIS post effects, Pokémon Sword): control sections each followed by its code area, in a zlib stream in main, see tfxo_streams and tfxo_shaders
 #   · control sections loose in main, in no GLSLC output or BNSH file (Advance Wars 1+2: Re-Boot Camp's Bink 2 shaders): paired with their code areas by data records or adjacency, see raw_shaders
@@ -463,6 +464,19 @@ def pg_shader(d, label):
     why = check(label, st, ctl, code)
     if not why and st != 'cs' and sph_stage(code) != st: why = f'the SPH stage {sph_stage(code)} does not match the object\'s magic'
     if why: red(f'{label} ({st}): {why}')
+    return [(f'{label}#PGSO', st, ctl, code)]
+
+AB4 = b'\xab' * 4
+def pg_shader_old(d, label):
+    """The PlatinumGames shader file of NieR:Automata's engine (.vso / .pso / .gso / .cso, 1,371 in five DATs of data000.cpk; no magic): u32 n (0x88), a binding table up to n - 4
+    (0xff = unused), u32 0xabababab, u32 code length, the code area, u32 control length, the control section, to the end of the file; the stage is in the code. One stage each,
+    like pg_shader. → the shader, or [] when the bytes are not laid out exactly so (scan_blob tries it on any blob whose word at n - 4 is the marker)"""
+    n = struct.unpack_from('<I', d, 0)[0]; ncode = struct.unpack_from('<I', d, n)[0]; c = n + 4 + ncode
+    if c + 8 > len(d) or d[c + 4:c + 8] != CTL_MAGIC or c + 4 + struct.unpack_from('<I', d, c)[0] != len(d): return []
+    ctl, code = d[c + 4:], d[n + 4:c]
+    st = glslc_stage(ctl, code)
+    why = check(label, st, ctl, code) if st else 'no stage in the code area'
+    if why: red(f'{label}: {why}')
     return [(f'{label}#PGSO', st, ctl, code)]
 
 MTARC, MTSPK = b'ARC\0', b'SPK\0'
@@ -1450,6 +1464,7 @@ def scan_blob(d, label, out):
         for nm, m in mem: scan_blob(m, f'{label}/{nm}', out)
         return
     if d[:4] in PG_STAGES and len(d) >= 0x18 and d[(o := struct.unpack_from('<I', d, 0xc)[0]):o + 4] == CTL_MAGIC: out.extend(pg_shader(d, label)); return
+    if len(d) >= 0x10 and 8 <= (o := struct.unpack_from('<I', d, 0)[0]) <= len(d) - 8 and d[o - 4:o] == AB4 and (sh := pg_shader_old(d, label)): out.extend(sh); return
     for m in re.finditer(b'BNSH\0\0\0\0', d):
         size = struct.unpack_from('<I', d, m.start() + 0x1c)[0]
         if m.start() + size <= len(d) and d[m.start() + 0x60:m.start() + 0x64] == b'grsc': out.extend(bnsh_shaders(d, m.start(), label))
