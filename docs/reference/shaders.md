@@ -66,6 +66,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** such an output is read by its section headers (+0x4c section count, section *i*'s header at +0x90 + 0x90 *i*, type 0 = GPU code; `glslc_program`; the same headers SDK 4's outputs are read through, [GLSLC outputs read through their section headers](#glslc-outputs-read-through-their-section-headers)), and its stages are paired with each other, not as single-stage programs. The NSP script now stops at the split when it finds none.
 - **Found on:** Baba Is You (no profile).
 
+### GLSLC outputs in a zip archive, and those NROs compile at run time
+
+- **Symptom:** an NVN game's split finds none of its shipped shaders, and the ones it compiles at run time were not captured: the game's renderer is in NROs that call `glslcCompile`, and its whole RomFS is one zip.
+- **Cause:** Portal keeps all its files in `game.zip` (41,416 members, Deflate or stored). The Source engine's D3D9 layer (`materialsystem.nro`) links each vertex and pixel shader combination into one program; the programs of the game's precache list (`portal/glbaseshaders.cfg`, 219 entries) ship compiled as `nxcontent/nvsb/<hash>.nvsb` (`NVSB`, version 0x65, the file's length at +8, a 0x60-byte header, then one GLSLC output holding a vertex and a pixel shader). A deflated member hides the GLSLC magic from the loose-file scan. The game compiles the rest with `glslcCompile` (its movie shaders and its own blits: 10 outputs within 30 s of boot), and the capture rule looked only for `main` holding GLSL sources and importing `glslcCompile`.
+- **Fix:** `shader_split.py` reads zip archives member by member in parallel ranges (`zip_jobs` / `zip_shaders`; `zipfile`), each member scanned like a loose file, whole GLSLC outputs included. `profile_guess.py` `shader_sources` asks for the run-time GLSLC capture when an NRO the game loads imports `glslcCompile` and a subsdk defines it (`glslc_capture`). Portal's map: 242 keys from the `.nvsb` files and 13 from the capture, 229 vertex and pixel pairs.
+- **Found on:** [Portal](../../dm/games/01007BB017812000/README.md). No other profile's RomFS has a zip archive holding shaders.
+
 ### G2S containers in KTGL RDB archives
 
 - **How it is stored:** each material's shaders are a G2S container (`_S2G3000`, type KTID `0x7bcd279f`; 23,108 entries in `asset/system.rdb.bin*`, 2.3 GB inflated) of GLSLC outputs, as in 13 Sentinels' `main`, inside zlib-chunked IDRK entries ([01](../agents/01-extract.md)). One `_DOK0000` container (type `0x20a6a0bb`, the engine's system resources) holds 151 more bare GLSLC outputs, 21 of them drawn in the first battle.
@@ -109,9 +116,16 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Note:** `CustomShaderPackage.mfx` (`MFX\0`, the effect descriptions) holds no shader code, and neither `main` nor any other ARC entry does.
 - **Found on:** [The Great Ace Attorney Chronicles](../../dm/games/010036E00FB20000/README.md) (Capcom's MT Framework): all 460 build, with Mario's binding layout; every binding decodes.
 
+### PKZ version 1 archives
+
+- **Symptom:** `[RED] ... PKZ version 0x10000: only 0x20000 is known` stops the shader split.
+- **Cause:** the PKZ reader accepted only the version first found on Bayonetta 3. Version `0x10000` uses the same 0x20-byte header, 0x20-byte entries and relative name offsets; the last header word is zero rather than a v2 alignment. The named compression method still determines how each entry is decoded.
+- **Fix:** `shader_split.py` accepts both `0x10000` and `0x20000`, retaining rejection of unknown versions. The existing Zstandard decoder and DAT/shader scanners handle the contents. Synthetic directory fixtures cover both versions in `dm/gfx/tests/test_pkz.py`.
+- **Found on:** [ASTRAL CHAIN](../../dm/games/01007300020FA000/README.md).
+
 ### PlatinumGames' shader objects
 
-- PlatinumGames' shader objects: `VSO\0` / `PSO\0` / `CSO\0` / `HSO\0` / `DSO\0` (the stage), u32 compiler version, u32 control length, u32 control offset (0x18), u32 code length, u32 code offset, and nothing else. The engine makes a program of each and binds them per stage at draw time, so they are single-stage programs, paired with a cover pixel shader (`shader_split.py` `pg_shader`; the archives: [01](../agents/01-extract.md)). It finds its built-in ones by name (`hwfillcolor.vso`, …) and checks each object's GPU code version against the driver's (the NVN layer's newest GPU code version follows the SDK: [Newest GPU code version reported by the driver](nvn-objects.md#newest-gpu-code-version-reported-by-the-driver), SDK 13.3.2).
+- PlatinumGames' shader objects: `VSO\0` / `PSO\0` / `CSO\0` / `HSO\0` / `DSO\0` (the stage), u32 compiler version, u32 control length, u32 control offset (0x18), u32 code length, u32 code offset, and nothing else. The engine makes a program of each and binds them per stage at draw time, so they are single-stage programs, paired with a cover pixel shader (`shader_split.py` `pg_shader`; the archives: [01](../agents/01-extract.md)). It finds its built-in ones by name (`hwfillcolor.vso`, …) and checks each object's GPU code version against the driver's (the NVN layer reports the translator's supported GPU-code range: [Newest GPU code version reported by the driver](nvn-objects.md#newest-gpu-code-version-reported-by-the-driver), SDK 13.3.2).
 - **Found on:** [Bayonetta 3](../../dm/games/01004A4010FEA000/README.md): 8,024 objects in `root_000.pkz` (`shader.dat`, `shader2.dat`, `shadereff*.dat`, `autoshadereff.dat`); 6,424 distinct keys (4,288 pixel, 2,047 vertex, 78 compute, 6 domain, 5 hull).
 
 ### BNSH files in PlatinumGames DAT archives inside CRI CPK archives
@@ -120,6 +134,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - Each file is one variation with one stage, so the split pairs nothing; as in Hades II, the vertex shaders write every output their pixel shaders read and no pipeline failed to link.
 - **Found on:** [Bayonetta 2](../../dm/games/01007960049A0000/README.md): 1,856 distinct keys (1,547 pixel, 309 vertex) in `shader.dat`, `shader2.dat` and `shadereff.dat` of `data000.cpk` (the split about 2.5 minutes); [Bayonetta](../../dm/games/010076F0049A2000/README.md): 458 distinct keys (236 pixel, 222 vertex), the members of `shader.dat` in `data00.cpk` (about 1.7 minutes). All build for both.
 - **Not checked:** 13 Sentinels and Catherine: Full Body's CPKs (no files on the drives).
+
+### Needle shader containers in main and GFD archives
+
+- **Symptom:** the split finds no shaders, although `main` contains NVN control sections; it reports that no data record or code-address pair identifies their code areas.
+- **Cause:** Needle keeps independent shader programs in `HNSHV002` containers, embedded in `main` and in GFD's GSC files inside CRI CPK archives. These are neither GLSLC outputs nor BNSH files. A container can hold many variants separated by reflection metadata.
+- **Fix:** `shader_split.py` `needle_shaders` uses the container's big-endian whole length at +8, then the little-endian NVN section descriptors: 0x90 bytes immediately before each control section, with control offset, code offset, code length and control length at +0x30. Both regions must fit within that container, and the control/code headers and lengths must agree. Graphics stages come from SPH; headerless compute stages from the control's thread-group dimensions. Each program is paired with the single-stage cover, since its draw-time partner is not recorded by this wrapper. Synthetic fixtures check embedded variants, compute, length mismatches and container boundaries.
+- **Found on:** [Persona 5 Royal](../../dm/games/01005CA01580E000/README.md#shaders), with 0x850-byte control sections. The game note records counts and runtime coverage.
 
 ### Shaders in a zlib stream in main (YEBIS .tfxo)
 
@@ -212,6 +233,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **How it is stored:** legacy version 4 paks with LZ5-compressed blocks ([01](../agents/01-extract.md)) and no shader code archive. Each material's shader map is serialized in its `.uexp` (38 to 87 shaders in the ones looked at) and the engine's global shaders in `Engine/GlobalShaderCache-GLSL_SWITCH.bin` (945: 597 pixel, 104 vertex, 241 compute, 3 geometry). Each shader's code is a byte array (`i32` length, then the bytes) holding one zlib stream that inflates to the same `LSLG` record as Unreal Engine 5's.
 - **Reader:** `shader_split.py` (`ue_legacy_jobs`, `ue_inline_shaders`) decodes every file of the newest copy of each path with the game's own LZ5 and takes each zlib stream that inflates whole from exactly the length in front of it and starts with `LSLG` (every such stream in the files looked at). Records stored uncompressed are taken too, but none were seen.
 - **Found on:** [DRAGON QUEST XI S](../../dm/games/01006C300E9F0000/README.md): 38,892 unique shaders (4,654 vertex, 33,981 pixel, 234 compute, 23 geometry) from 1,740 files; vertex and pixel shaders are paired as single-stage programs, as for Octopath Traveler 0.
+
+### Unreal Engine 4.27 shaders inline in cooked packages (LZ4)
+
+- **Symptom:** `the RomFS has Unreal paks, but none … holds a shader code archive`, then `the shader split found no shaders in main or the RomFS`.
+- **How it is stored:** a version 11 pak (Zlib blocks, index not encrypted) with no `.ushaderbytecode`: the project turned `bShareMaterialShaderCode` off, so each material keeps its shaders in its own `.uexp` and the engine's global shaders are in `Engine/GlobalShaderCache-SF_GLSL_SWITCH.bin`, as in [Unreal Engine 4.18](#unreal-engine-418-shaders-inline-in-cooked-packages). Unreal 4.27 serializes each one as an entry of `FShaderMapResourceCode`: the code (`i32` length, then an LZ4 block, the engine's shader compression since 4.26), the raw size (`i32`) and the frequency (`u8`).
+- **Reader:** `uepak.py` `inline_shaders` tells such a pak from one with archives by its directory index (cooked packages and no `.ushaderbytecode`; an encrypted index is taken for one with archives), and `shader_split.py` `ue_legacy_jobs` reads it file by file, Zlib and LZ4 blocks decoded in Python (`Pak.read`), so no host runs. `ue_inline_shaders` finds each LZ4 block by its first literals, the record's `LSLG`, with the token and literal length bytes in front of it, and takes it when it decodes to exactly the raw size after the block.
+- **Found on:** [OCTOPATH TRAVELER II](../../dm/games/0100A3501946E000/README.md): 13,980 unique shaders (1,910 vertex, 11,346 pixel, 694 compute, 30 geometry) from the 3.3 GB pak in 13 s.
 
 ## Control sections and code
 
@@ -387,6 +415,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
   - `geometry_finish` in `dmsh_build.py` takes the output vertex count and primitive class of such a shader from the input topology (the header declares one vertex of a triangle strip).
 - **Found on:** [NieR:Automata The End of YoRHa Edition](../../dm/games/0100B8E016F76000/README.md): `IndexBuildIndependent_{b,x}{cw,ccw}.gso` are the depth prepass, one draw per mesh, and each also writes the mesh's culled index list and its count for the shading pass's indexed indirect draws.
 
+### Geometry draws above the capture scratch bound
+
+- **Symptom:** `[RED] geometry draw needs 261 MiB of scratch, above the 256 MiB bound` (or `exceeds the capture or invocation bound`); the draw is skipped.
+- **Cause:** the geometry path captures the vertex shader's outputs for every vertex between the draw's lowest and highest index, for every instance, and the geometry kernel's outputs take room per primitive (`nvn_geometry.inc` `geo_draw`). Unreal's one-pass point light shadow draws a whole level mesh through its geometry shader.
+- **Fix:** such a draw is drawn in runs in the hardware's order (`geo_split`): one instance at a time, then runs of at most 4,096 primitives of a list topology whose index range fits 64 MB of capture. The index list is read once and the runs skip the GPU wait the outer draw took (a first version halved the draw recursively, each part reading the indices again and waiting: that frame took 805 ms). The index compaction after the geometry kernel was one thread walking every group; it is a count, an offset scan and a write dispatch now (`nvn_geometry.h`, `t_geometry`). Scratch arenas above 32 MB are kept while such draws go on and released after 600 idle submissions (`nvn_mtl.m` `arena_begin`), and `arena_new` takes the smallest free arena that fits.
+- **Found on:** [OCTOPATH TRAVELER II](../../dm/games/0100A3501946E000/README.md): 129,032 triangles of one mesh (vertex `9214254d203a4e45`, geometry `cb17a9453d4789d0`, both from the default material) at the start of the first battle and in the scene after it; with the one-thread compaction each such frame took about 300 ms, now only the first is long (395 ms on the Mac, with two new pipelines and the scratch allocation).
+- **Note:** strips, fans and primitive restart are not split. The primitive numbers restart at 0 in each run; this geometry shader reads only its index map by them, but one that read its primitive ID would see other numbers than on the Switch.
+
 ### Tessellation stages are not drawn
 
 - **Symptom:** `primitive type 14 not implemented`; patch draws skipped.
@@ -515,6 +551,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [DRAGON QUEST VII Reimagined](../../dm/games/0100A9D01C446000/README.md): the per-pixel volumetric lightmap read brick (0, 0, 0) of the brick atlas for almost every cell. Unreal merges each streamed level's lightmap into one atlas on the GPU: brick copies (`0a7ff4171bd1a82a`), then a patch of the shared 16³ `RGBA8_UINT` indirection texture (`7b958a7b21e72801`) whose bounds come from `GetDimensions` on the very `RWTexture3D` it writes. Only cell (0, 0, 0) was written, every other cell kept size 0, and the shader fell back to the atlas origin: the first daytime level's bricks, baked about 2¹⁵ brighter (the same bricks in gameplay hold 0.5–1.4). [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) has four such size queries (`cp_t_tcb_48` / `_4A`).
 - **Check:** how it was found: the raw scene colour (`texraw`) put the characters at 1,000–2,000 and the walls at 0.05; a debug build of one character shader that wrote its terms in alternating 8-pixel columns isolated the volumetric lightmap ambient term; dumps of the atlas (`texlist` / `texraw`), of the uploaded level bricks (the 3D upload dump) and of the indirection texture, with the cell computed from the primitive's origin and View `VolumetricLightmapWorldToUVScale / Add` (View 220 / 221), gave the rest.
 
+### More than 64 bindings in one shader
+
+- **Symptom:** `[RED] shader … reflection conversion failed: 66 bindings, over the limit 64`, then `failed to load`, and the draws with it are dropped (a black map).
+- **Cause:** the reflection is converted into fixed arrays of `NVN_REFL_MAXB` bindings (`nvn_refl.h`), which was 64. NVN gives a stage 32 textures and 32 samplers beside its uniform and storage buffers and images, so a shader can have more.
+- **Fix:** `NVN_REFL_MAXB` is 96; the argument buffer entries keep their own limit (`NVN_REFL_MAXARG`, 192).
+- **Found on:** [OCTOPATH TRAVELER II](../../dm/games/0100A3501946E000/README.md): the 3D world map of the traveler selection (`UiMM_WorldMap3D`, pixel shader `f7c8373b7323687d`: 30 textures, 30 samplers, 3 uniform buffers and the c1 / support / driver segments).
+
 ### Image atomics
 
 - **Symptom:** the replay put a texture resource ID where the shader wanted an address; with the old 64 KB dummy buffer, pointers in the game's objects and in the host's program objects got their upper 4 bytes replaced and the game or the replay crashed, or `kIOGPUCommandBufferCallbackErrorPageFault`, after which macOS ignores the process's command buffers (GitHub issue #101).
@@ -522,6 +565,60 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** the pointer is now its own kind (`NVN_RB_IMGA`), bound to the storage of the image in that slot: a buffer texture is a view of its memory pool, so the atomics and the texture reads see the same words. A block-linear image is a deswizzled Metal copy whose pool memory has another layout, so its atomics go to a scratch buffer (logged red) until a game needs them followed; a 3D image does not compile at all ([Unreal Engine 5 shader code archives (Oodle)](#unreal-engine-5-shader-code-archives-oodle)). The scratch buffer is at least as large as the image (`atom_scratch`): SPIRV-Cross indexes the atomics by the image bound in the same slot (`spvImage2DAtomicCoord`: x + y × its width).
 - **Found on:** [Octopath Traveler 0](../../dm/games/01005270232F2000/README.md): 2,084 such shaders (Unreal's GPU particles); three ran in the first 100 seconds. [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md): in the 64 KB dummy buffer used before, its atomic max into a 480x270 r32ui 2D array (fragment shader `2bd5037003980716`, the scene after the story opening's first cutscene) ran about 1.4 MB past its end, writing into zero-copy pools over the game's heap and into unmapped addresses (GitHub issue #101).
 - **Note:** Metal shader validation (`MTL_SHADER_VALIDATION=1`) stops out-of-bounds accesses, so under it the scene played.
+
+### Bounded MSL 2.3 atomic emulation
+
+- **Symptom:** Metal shader validation reports invalid image-atomic stores even with an image-sized scratch buffer; without validation, GPU page faults can freeze rendering.
+- **Cause:** the translator lost the surface instruction's `IGN` bounds mode before lowering an image atomic to a raw buffer pointer. Scratch capacity cannot protect against invalid coordinates; the upstream 2D coordinate helper also omits array layers.
+- **Fix:** preserve the supported bounds mode, guard every coordinate before pointer construction, use layer-aware 64-bit addressing, and validate the matching image and buffer's layout and capacity before binding. The supported contract and tests are described below.
+- **Found on:** [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md#rendering), with the development-build report and remaining gameplay validation recorded there.
+
+Sizing the backing buffer does not make an out-of-range image coordinate safe.
+The offline translator now preserves the Maxwell surface instruction's bounds
+mode and explicitly discarded result. Its Metal-only lowering accepts `IGN`
+reductions and non-CAS atomics writing `RZ`; returning, predicate-returning,
+`TRAP`, and unknown modes fail translation rather than acquiring invented
+out-of-bounds semantics. This path supports non-indexed 32-bit buffer, 2D and
+2D-array images. Other translator callers do not enable it. Source 1D and
+1D-array instructions retain the existing one-row normalization to 2D `(x, 0)`
+and 2D-array `(x, 0, layer)`; buffer coordinates stay scalar, and buffer MSL is
+not rewritten by the 2D helper. Source 64-bit, floating-point and half2 atomics
+are rejected before descriptor-format resolution can erase their original size.
+Descriptor-sized 32-bit atomics also reject non-R32 integer descriptors before
+the legacy format fallback, both for bound images and constant-buffer-resolved
+bindless handles. An unresolved bindless atomic fails translation instead of
+being removed by bindless elimination. These checks apply only to the Metal
+atomic path; other translator backends retain their existing behavior.
+Indexed, 3D, multisample and other unsupported effective image shapes fail
+closed on this opt-in path; this is not a native-image-atomic implementation.
+
+The SPIR-V queries the bound image's dimensions and tests every original
+coordinate (including the layer) before forming the texel pointer or executing
+the atomic. Negative coordinates fail an unsigned comparison. Coordinates are
+not clamped, flattened for the bounds check, or changed in SPIR-V.
+`dmsh_atomic.py` recognizes the exact standalone SPIRV-Cross MSL 2.3 coordinate
+helper and replaces only that definition with typed, layer-aware helpers using
+64-bit address arithmetic; shader statements and call sites are untouched.
+An unrecognized helper or default alignment fails the build. This is a packed
+emulation layout, not proof that an arbitrary native pool's row pitch, layer
+stride or texture-view offset matches it. The host checks the matched IMG/IMGA
+[layout and capacity contract](../image-atomic-binding-contract.md) before
+binding; block-linear scratch still discards results and does not implement
+image read/write coherence.
+
+Changing this path invalidates the chain and shader cache. Rebuild the translator
+and record its actual fingerprints before preparing shaders again; a host-only
+rebuild is insufficient. The synthetic regression is
+`dm/tools/tests/test_image_atomic_bounds.py`: portable helper/algebra checks plus
+an opt-in rebuilt-translator → SPIR-V validation → MSL 2.3 check. Set
+`DMSH_TEST_XLATE` to the rebuilt translator, with `spirv-val` and `spirv-cross` on
+`PATH`; `DMSH_TEST_METAL=1` also compiles and links with Apple's Metal compiler.
+Set `DMSH_TEST_METAL_SDKS=macosx,iphoneos` to check both SDKs.
+The dimension fixture covers both instruction families for source 1D, buffer,
+1D array, 2D, 2D array and rejected 3D; accepted forms pass SPIR-V validation,
+Cross/helper lowering and the optional Metal checks. Shader acceptance does not
+imply admission of every native host layout. None of these tests executes a
+shader on a GPU.
 
 ## Shaders compiled at run time
 
@@ -540,10 +637,18 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 - **Symptom:** a null read at `main+0x3316dc` in `nnMain`, right after the window setup (the program object's interface pointers at +0xd0 / +0xd8 both null).
 - **Cause:** the game compiles two built-in programs at boot with its own GLSLC (`subsdk0`, the same build as Link's Awakening's), and first checks that GLSLC's GPU code version against `nvnDeviceGetInteger` items 0x2E–0x31 (the driver's supported range, `main+0x330dcc`). The host reported Super Mario Odyssey's SDK 7 driver range, 1.5–1.14; this GLSLC writes 1.15, so nothing was compiled and the first uniform lookup read the empty program.
-- **Fix:** every SDK's driver runs the code of the GLSLC in the same SDK, so the host now reports at least the version the game's own `glslcGetVersion` returns (`hle_glslc.c` `dm_glslc_gpu_code`, `hle_nvn.c`). The newest version the host reports also follows the SDK since Bayonetta 3 ([Newest GPU code version reported by the driver](nvn-objects.md#newest-gpu-code-version-reported-by-the-driver)).
+- **Fix:** every SDK's driver runs the code of the GLSLC in the same SDK, so the host now reports at least the version the game's own `glslcGetVersion` returns (`hle_glslc.c` `dm_glslc_gpu_code`, `hle_nvn.c`). The host also advertises the translator's supported range for precompiled shaders ([Newest GPU code version reported by the driver](nvn-objects.md#newest-gpu-code-version-reported-by-the-driver)).
 - **Found on:** [Catherine: Full Body](../../dm/games/0100BF00112C0000/README.md) (SDK 8.2.1, Atlus's GFD engine, CRI middleware; one boot).
 
 ## Pipelines and caches
+
+### Pipeline keys omit unused colour state
+
+- **Symptom:** identical render pipelines compile repeatedly under different keys, lengthening startup prewarm and adding pipeline misses during play.
+- **Cause:** NVN blend and channel-mask state persists between draws, including state for colour targets absent from the current pass. `pso_desc` skips targets without a format and reads blend factors only when blending is enabled, but the old keys retained unused state. Deduplicating manifest lines alone also misses old rows whose unused state differs.
+- **Fix:** `pso_key_norm` in `nvn_pso_skey.h` clears blend factors when blending is disabled and, for normal passes, the blend-enable bit and write-mask nibble of every target without a format. Merged passes retain their logical blend-enable and mask state because `lmap` maps physical attachments to logical targets; a missing physical format does not imply the same logical target is unused. `pso_key_fill` normalizes live keys, `pso_skey_parse` normalizes historical prewarm rows, and `warm_worker` deduplicates the parsed keys across all input lists before compiling. Depth and stencil formats remain in the key because the `MTLDevice` path needs them, even though Metal 4 bases omit them.
+- **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md#files-and-shaders) (disabled blend factors), [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md#files-and-shaders) (absent-target state, reported by MacNativeGames).
+- **Check:** `t_pso_skey` covers normalized round trips, historical rows differing only in unused state, and preservation of merged-pass logical masks and blend bits; `t_pso_archive` checks disabled blend factors with all targets present. `make -C dm/gfx/tests GAME=<id> check_t_pso_warm` loads two synthetic manifests through `warm_worker`, checks compilation counts and draw-time cache hits, and compares GPU pixels with the original descriptors through both MTLDevice and Metal 4. It includes a merged pass whose physical attachment 0 uses logical target 7's blend and mask state.
 
 ### Shader cache key covering the pairs
 
@@ -565,6 +670,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Cause:** Metal builds such a pipeline only with an input primitive class, and the translator writes a point size in every vertex shader, which needs the point class: no class fits both.
 - **Fix:** `vs_layer` drops the point size from vertex shaders that write the layer, and the host gives their pipelines the triangle class once Metal names the reason (`layer_out` in `pso_get_` and in the background prewarm). Their passes are layered ([Layered passes for vertex shaders that write the layer](rendering.md#layered-passes-for-vertex-shaders-that-write-the-layer)).
 - **Found on:** [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md): two full-screen vertex shaders (`57246f9a04af8529`, `b29f08619f379a83`: one triangle per instance, layer = instance + offset, 20 pixel shaders read the layer).
+
+### The precompile look-ahead restores the scissor
+
+- **Symptom:** the picture bright green and white from some scene on, in runs with pipelines compiled on demand (prewarm lists off or short) and in none with `DM_NVN_PREDICT=0`.
+- **Cause:** after a pipeline miss the replay looks ahead through the rest of the submission, replaying state only, to compile the next pipelines in the background (`pso_predict_rest`). It restored `S`, but `state_op` also sets the scissor, which lives in `R`: the replay went on with the last scissor of the submission until its next `OP_SCISSOR`, so the draws in between were clipped to another pass's rectangle.
+- **Fix:** the scissor is saved and restored with `S`; the fusion probe (`fz_probe_cov2`) already restored all of `R`. Every game.
+- **Found on:** [OCTOPATH TRAVELER II](../../dm/games/0100A3501946E000/README.md): from Castti's opening flashback and the battlefield of Hikari's opening on.
+- **Check:** found by bisecting with four runs started at once on copies of one save: `DM_NVN_PREDICT=0` fixed it, a look-ahead that compiled nothing did not, and of its parts only the state ops brought it back; four runs green before the fix, four right after it.
 
 ### A cold Metal cache looks like a long load
 

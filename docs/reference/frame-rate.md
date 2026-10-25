@@ -39,6 +39,15 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 
 ## Present interval and display rate
 
+### Present thread rescues a silent display link
+
+- **Symptom:** the app is active and the game keeps running, but the picture freezes while display-link callbacks stop; the log repeatedly drops queued frames.
+- **Cause:** dropping frames releases the game's swapchain textures but never displays them. A display link may stop while the app is active, including an occluded Mac window.
+- **Fix:** after 500 ms of silence while active, `mtl_present_wait` requests rescue. `link_sync` invalidates the display link on its run loop before releasing the layer to the present thread, which takes its own drawables in mode 0. Retry delays are 3, 6, 12, 24, 48 and then at most 60 seconds. Rescue state changes take `g_pq_mu`; the requested `g_dm_present_link` stays unchanged, and a new runtime mode ends rescue immediately. A retry resets stall timing. Inactive and background time do not count towards the 500 ms threshold, including a focus timestamp newer than the watchdog's clock sample.
+- **Found on:** d2r-mobile commit `afad65c` (an iPhone picture froze for 80 seconds), carried through MacNativeGames `cf1e629` and [PR #198](https://github.com/seedds/nxnative/pull/198). That upstream title has no profile in this repository; no local game reproduction is claimed.
+- **Check:** `make -C dm/gfx/tests GAME=010015100B514000 t_present_rescue` and `dm/gfx/tests/t_present_rescue` exercise the production wait and retry paths with a controlled clock and a silent link double, without a GPU. They cover foreground grace, backoff saturation, runtime mode changes, and layer release only after run-loop invalidation. The test also runs in CPU graphics CI. `make -C dm/gfx/tests GAME=010015100B514000 check_t_present_rescue` adds a paused real Metal display link on an offscreen Mac layer: rescue invalidates it, then `nextDrawable` succeeds (47 checks, zero failures with Metal validation). `DM_TEST_LINK_STALL=<start seconds>,<duration seconds>` pauses a real window's display link for manual verification.
+- **Not checked:** gameplay during stalled-link recovery or the iPhone; the PR's gameplay runs were headless.
+
 ### Frames of a dynamic present interval held on screen and at the acquire
 
 - **Symptom:** "sometimes the speed increases when jumping" (Mario 1.2.1 on the iPhone): in `display` mode interval-2 frames were shown for 16.7 ms and the game visibly jumped ahead. "When pressing B, Link's move pace is speeding up" (Breath of the Wild on the iPhone); `old frames dropped by merging`.
@@ -49,6 +58,19 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) (1.2.1, iPhone: the display-link hold); [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (iPhone: the acquire).
 - **Check:** `DM_TEST_PRESENT_LAG=90,30` (sleep 30 ms before every 90th present) makes Mario do this on the Mac; run it with `DM_WINDOW=1` to get the display link. `DM_NVN_TSV` writes each frame's interval as `@itv`.
 - **Note:** the windowless Mac host was never affected by the acquire: there the acquire sleeps until the interval's slot.
+
+### Present snapshots: the game's swapchain texture free at once
+
+- **Symptom:** frames miss the screen while the GPU stays at its lowest clock (444 MHz on an M2 Max); more work (a higher render scale) only makes the frames slower.
+- **Cause:** a game with two swapchain textures gets one back only when the display link has taken its previous present, so each frame's CPU work starts on a tick and the GPU idles from the end of one frame to the first work of the next. macOS reads that idle time as room and keeps the clock low.
+- **Fix:** present snapshots (`DM_PRESENT_SNAP=<n>`, a ring of n host textures, 2 to 4; off by default on iOS and Mac; `nvn_mtl.m` `snap_take`): each present is copied on the game's queue, right after the frame's work, into the next ring slot; the display link shows the copy, and the game's texture is free at once. The game runs up to a frame ahead of the screen, and a frame whose work runs long is absorbed instead of shown late. Acquire waits for ring capacity and counts it as pacing (`mtl_snap_acquire_wait`). Present never waits for a snapshot slot: if it is still busy (several textures acquired ahead of time, or a copy not finished), the original texture is queued with its usual acquire ticket. Waiting inside present held the game's locks while the screen was stalled.
+- **Setting:** the iOS launcher's **Frame buffering** toggle is offered for NVN builds, defaults off and remembers the choice. `Documents/env.txt` overrides it (`DM_PRESENT_SNAP=1` on, `0` off); restart the app after editing the file. The Mac uses the same environment variable. Device performance and latency need validation before enabling it by default.
+- **Fix:** the frame step judges lateness by what the screen shows while snapshots are on: the on-screen interval of the frame 8 presents back, against its hold (`fstep_tick`, `nvn_fstep.screen`). Judged by its cost, a frame whose CPU time holds the game's waits on its own GPU work (which now runs a frame later) looked late at a GPU time of 0.75 vsyncs.
+- **Note:** the cost is up to a frame more latency.
+- **Note:** with Metal encoding on its own thread (`DM_NVN_ENC_THREAD`, the default on iOS) the copy is a block of the encode thread's own queue (`rec_own_push`), behind everything submitted before the present, so a present from another thread than the submitting one gets a snapshot too; the present waits only until that block is encoded (`snap_commit_wait`). The wait ledger `DM_NVN_WAITS=1` counts every CPU wait for the GPU or the encode thread (`[waits]` every 300 frames).
+- **Fix:** suspend drains snapshot commits and their GPU event even when their display tickets were discarded (`snap_drain` in `mtl_drain`). Submission fences and upload completion do not cover these copies; previously suspend could return while the encoder still held a copy to submit.
+- **Check:** `make -C dm/gfx/tests GAME=01007EF00011E000 check_t_present_snap` uses a gated encoder and GPU to check suspend, and a delayed present consumer to check nonblocking present, acquire pacing, fallback tickets and copied pixels after ring reuse. Runs with Metal validation on the Mac, with and without the encode thread; does not measure iPhone frame rate or latency.
+- **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (Mac; on the iPhone 17 Pro Max with the encode thread a steady 60 fps at docked resolution, present to screen about 74 ms with a ring of 2 against about 46–60 ms without).
 
 ### Vulkan acquire and vsync event follow the display link
 
@@ -75,6 +97,22 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Not checked:** the link's new range after a switch has not run here (Hades windowed and fullscreen paced at 60 as before).
 
 ## CPU cost and pacing
+
+### Arena buffer ownership on allocation
+
+- **Symptom:** autorelease work takes a measurable share of replay time, with temporary arena-buffer ownership traffic a few times per draw.
+- **Cause:** under ARC an unqualified `id<MTLBuffer> *` out-parameter is `__autoreleasing`, so assigning the arena buffer in `arena_alloc` autoreleases it. Reading `buf.length` also sends an Objective-C message on each allocation and while selecting or trimming arenas.
+- **Fix:** both declarations of `arena_alloc` use a `__strong` buffer out-parameter, matching every caller's strong local. `NvArena` caches its buffer length when created; allocation, reuse selection and idle trimming use that value. Buffer ownership and fence-based reuse remain the same.
+- **Found on:** MacNativeGames commit `0531f28`, ported in [PR #195](https://github.com/seedds/nxnative/pull/195), reports autorelease work falling from 2.63% to 1.73% of replay time; the PR does not identify the game for that measurement. It has not been repeated here.
+- **Check:** `t_ub`, `t_vbuf` and `t_geometry` exercise arena-backed uniform shadows, vertex conversion and geometry scratch on the Mac with Metal validation.
+
+### Registry lock priority inheritance
+
+- **Symptom:** the submit thread waits on the texture / sampler registry lock while a lower-priority registration thread is preempted holding it.
+- **Cause:** game threads register textures and samplers under `g_rmu`, which the submit thread also takes for argument encoding. The previous mutex allowed those owners to delay the higher-priority submitter.
+- **Fix:** `g_rmu` is an `os_unfair_lock`, lending a waiter's priority to its owner. All registration, lookup, cache, diagnostic and test callers use its lock API; the critical sections and lock order stay the same.
+- **Found on:** [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md), measured upstream in MacNativeGames commit `5f5de5e` and ported in [PR #195](https://github.com/seedds/nxnative/pull/195): in a shrine, game threads at priority 46 delayed the submit thread at priority 97 by about 1.8 ms a frame. Waiting fell from 155 to about 0 ms/s there, with unchanged frame time. Those game measurements have not been repeated here.
+- **Check:** `t_stencil_view`, `t_view_levels` and `t_view_swizzle` exercise production registry lookups and cached views with the new lock on the Mac.
 
 ### Submissions handed to the GPU in segments
 

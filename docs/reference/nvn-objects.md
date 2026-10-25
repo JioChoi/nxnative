@@ -81,6 +81,13 @@ The game may also write into an NVN object directly, without an NVN call, throug
 - **Found on:** [Fire Emblem Engage](../../dm/games/0100A6301214E000/README.md): it now stays at 1.2 to 1.4 GB.
 - **Note:** the `memory up to frame` line also reports `serial objects` (host objects by serial), `freed but alive` (finalized pool buffers still alive) and `shared textures` (sharing table size and evictions); growth in GPU memory with those counts flat points to an allocation outside them.
 
+### Finalized pool buffers kept by a guest thread's autorelease pool
+
+- **Symptom:** the memory line's `freed but alive` count only grows, while no host table holds those buffers; "GPU allocated" is far above resident memory (Ghost Trick: Phantom Detective, 125 to 146 buffers and 6.6 to 8.7 GB of GPU allocations against 2.2 GB resident).
+- **Cause:** `mtl_pool_del` runs on the guest thread that finalizes the pool, whose implicit autorelease pool never drains, and adding the buffer to the weak table `g_dead_pools` (the table behind `freed but alive`) left it autoreleased there: every finalized pool's zero-copy buffer stayed alive for good, wrapping freed guest memory. A temporary census of every host table that can hold a texture over a pool buffer (by serial, finalized serials, the sharing table, texture ID views, view caches, the deferred queue, the residency set) found no holder at all. `containsObject:` and `removeObject:` on a weak `NSHashTable` do the same (a standalone test: the object outlived its last strong reference until its thread ended), and `res_add` / `res_remove` call them on guest threads too.
+- **Fix:** `mtl_pool_del`, `res_add_at` and `res_remove` (`nvn_mtl.m`) each have their own `@autoreleasepool`, as `defer_drain` and the memory line's count already did ([Deferred-release drain without an autorelease pool](memory.md#deferred-release-drain-without-an-autorelease-pool)).
+- **Found on:** [Ghost Trick: Phantom Detective](../../dm/games/010029B018432000/README.md): 0 buffers freed but alive with the fix; GPU allocated 1.7 GB instead of 8.3 GB 300 frames into the boot and 2.9 GB instead of 9.9 to 11.7 GB in Chapter 1, resident memory, frame times and pictures unchanged (zero-copy buffers add no memory of their own). [Pokémon Sword](../../dm/games/0100ABF008968000/README.md): 8 to 0 at the title after 90 s. Earlier Mac logs show the count in most games, growing with play: Animal Crossing: New Horizons 3,113 after 27,900 frames, Pokémon Sword 2,050, Super Smash Bros. Ultimate 1,279, Pokémon Legends: Z-A 932 (small pools there: 100 to 300 MB).
+
 ### Memory-pool tracking table grows in blocks
 
 - **Cause:** the memory-pool tracking table had a fixed 4,096 slots; a pool past the end would have its textures re-uploaded at every use.
@@ -173,6 +180,13 @@ Games read this count as a position in their own command memory and size their h
 - **Note:** block-linear CPU-written textures still need the packaged-texture re-upload path (next entry).
 - **Check:** `DM_NVN_TEXCPU=1` lists non-packaged textures in CPU-visible pools.
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md): its glyph cache (the text texture) and its four 64×1 RGBA16F sky colour ramps.
+
+### Linear render-target storage without the LINEAR flag
+
+- **Symptom:** a trap during graphics initialization in `SetupSurfaceInfoMemoryInside`, asserting `ctx.memorySize <= localmemsetupinfo.memorySize`.
+- **Cause:** `LINEAR_RENDER_TARGET` specifies linear storage independently of `LINEAR`. The Metal backing path recognized either flag, but the storage-size and deswizzle helpers tested only `LINEAR`, underallocating some render targets and treating their rows as block-linear.
+- **Fix:** `nvn_tex.c` recognizes either flag for linear sizing and excludes both from block-linear level offsets, GOB columns and sparse layout. `nvn_deswizzle_geom` rejects both. `tex_linear` uses the same calculated row pitch, including implicit alignment, as `GetStorageSize`. Render-target rows align to 128 bytes; ordinary linear rows align to 32. Explicit strides are preserved. `t_tex` covers the layout and `t_linear_readback` checks a GPU clear against padded CPU-visible rows.
+- **Found on:** [Persona 5 Royal](../../dm/games/01005CA01580E000/README.md#rendering): a 16x16 RGBA8 target with flags `0x44` and stride 128 needs 2 KB; block-linear sizing returned 1 KB.
 
 ### Textures written with `nvnTextureWriteTexels`
 
@@ -269,6 +283,14 @@ Games read this count as a position in their own command memory and size their h
 - **Found on:** [Fire Emblem Engage](../../dm/games/0100A6301214E000/README.md): probably fixed; since the pause, 12 runs (eight of them 200 s runs through the movie and title, four of 330 to 850 s) have not stalled once, where one in four used to.
 - **Note:** if a stall comes back, sample the process when its log stops growing (`sample <pid> 3`) to see where every thread waits. The crash handler writes one line with `write()` and exits if the stderr lock stays taken for 1 s, so a stall that holds that lock shows up as such.
 
+### Dirty-page writes missed during upload
+
+- **Symptom:** a CPU-written texture stays stale after later writes; letters can be missing from a glyph cache.
+- **Cause:** a protect skipped a page another thread was unprotecting, leaving it writable with a generation already covered by the upload stamp. Taking the stamp after protecting, or setting the cached last-check generation after the upload, could also cover a fault whose bytes arrived after the read. Separately, an unprotect advanced the global clock before publishing the page generation: a checker could cache a clean result in between and never scan again once the page became writable. Both the page-fault path and batched host pre-write path had that publication window.
+- **Fix:** take the stamp before protecting and reading, and start the last-check generation at that stamp. Finish any pending protection run before waiting for a BUSY page, then retry that page. Both unprotect paths use `stamp_page` to publish the page generation and advance the global clock once more afterward, invalidating checks that ran before publication. These are general tracker and cache rules, with no game-specific gate.
+- **Found on:** [Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md), reported in MacNativeGames commit `a166602` and ported through [PR #197](https://github.com/seedds/nxnative/pull/197). The missing-letter symptom has not been reproduced in nxnative; the tracker failures are reproduced locally by the regression tests.
+- **Check:** `t_dirty_race` covers the BUSY-page retry, stamp ordering, and a check between clock allocation and generation publication in both unprotect paths. The publication cases fail on main; the batched case also fails with the original PR applied.
+
 ## NVN entry points
 
 ### Version and capability checks that fail quietly
@@ -287,11 +309,11 @@ Games read this count as a position in their own command memory and size their h
 
 ### Newest GPU code version reported by the driver
 
-- **Symptom:** null read at `main+0xb8462c` right after the first two textures, called from `main+0x670eb0`.
+- **Symptom:** null read at `main+0xb8462c` right after the first two textures, called from `main+0x670eb0` (Bayonetta 3), or cleanup crashes at `main+0x9c0d1c` after shader initialization fails (ASTRAL CHAIN).
 - **Cause:** not the fault itself: `nnMain`'s start-up (`main+0x6705c0`) returns false when any of its 30 steps fails, the game then skips its main loop and goes straight to shutdown, and the shutdown walks a pool (`main+0x4efce70`) whose initialization (`main+0xb840d0`) came after the failed step. `DM_PROBE` on each step's entry (lldb was unavailable: developer mode off) showed the last one entered, `main+0x69c698`, the built-in shaders of `shader2.dat` (`hwfillcolor`, `hwshaderpf`, …), and probes inside it the step that failed: creating a shader from its object (`main+0xd0d998`). The engine checks each shader object's GPU code version (byte 6 major, byte 7 minor of the object) against the driver's range (`nvnDeviceGetInteger` 0x2E–0x31: newest major, oldest major, newest minor, oldest minor) and refuses newer code; the host reported 1.14, the table measured on Super Mario Odyssey's SDK 7 driver, and `hwfillcolor.vso` is 1.15 (the game's objects run from 1.9 to 1.16).
-- **Fix:** a driver runs the code of its own SDK's GLSLC, so the newest version the host reports now follows the SDK: 1.15 from SDK 8 (Catherine: Full Body's GLSLC 8.2.1), 1.16 from SDK 13 (Bayonetta 3's newest objects), and at least the version of a GLSLC the game carries, as before (`hle_nvn.c`; that GLSLC check: [GLSLC GPU code version against the driver's range](shaders.md#glslc-gpu-code-version-against-the-drivers-range)). For every game.
+- **Fix:** report the translator's supported GPU-code range, through 1.16, independently of the linked SDK. Precompiled shaders can come from a newer compiler: ASTRAL CHAIN links SDK 6.4 but ships 1.15 objects, defeating the earlier SDK-based floor. Keep the additional floor from a GLSLC the game carries (`hle_nvn.c`; that GLSLC check: [GLSLC GPU code version against the driver's range](shaders.md#glslc-gpu-code-version-against-the-drivers-range)). `t_nvn.c` checks the advertised range even without a loaded SDK.
 - **Note:** a wider range only lets more shaders pass such checks.
-- **Found on:** [Bayonetta 3](../../dm/games/01004A4010FEA000/README.md) (SDK 13.3.2, PlatinumGames' engine); [Catherine: Full Body](../../dm/games/0100BF00112C0000/README.md) (its GLSLC 8.2.1 set the SDK 8 value); [Super Mario Odyssey](../../dm/games/0100000000010000/README.md) (the table's 1.14).
+- **Found on:** [Bayonetta 3](../../dm/games/01004A4010FEA000/README.md) (SDK 13.3.2, PlatinumGames' engine); [Catherine: Full Body](../../dm/games/0100BF00112C0000/README.md) (its GLSLC 8.2.1 set the earlier SDK 8 value); [Super Mario Odyssey](../../dm/games/0100000000010000/README.md) (the table's 1.14); [ASTRAL CHAIN](../../dm/games/01007300020FA000/README.md) (SDK 6.4, precompiled GPU code 1.15).
 
 ### Extensions fetched by name and called unchecked
 
