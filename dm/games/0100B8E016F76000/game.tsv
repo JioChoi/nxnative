@@ -53,5 +53,5 @@ tex_dirty_upload	on
 feedback_snap	fd2c47b73f0e7e24
 
 # ---- Shader split (shader_split.py; the shader files in data000.cpk) ----
-shader_groups	#shader.dat/=shader #shader2.dat/=shader2 #shadereff.dat/=effect #shadereffcs.dat/=effect #autoshadereff.dat/=autoeffect
+shader_groups	/shader.dat/=shader /shader2.dat/=shader2 /shadereff.dat/=effect /shadereffcs.dat/=effect /autoshadereff.dat/=autoeffect
 shader_note	NieR:Automata The End of YoRHa Edition shaders

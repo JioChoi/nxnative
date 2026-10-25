@@ -56,9 +56,11 @@ def mac_compile(msl, air, lib):   # same interface as ios_metal.compile
 #   c2 0x120 + 8 r: images (nvnCommandBufferBindImage), slot r < 8
 #   c2 0x168 + 8 r: separate textures (nvnCommandBufferBindSeparateTexture), reported as slot 128 + r, where the host binds them (hle_nvn.c, NVN_SEPTEX_SLOT0); Unity, Unreal and RE Engine bind these
 #   c2 0x568 + 8 r: separate samplers (nvnCommandBufferBindSeparateSampler), slot r < 128
-#   c0 base + 0x10 r: storage buffer r (64-bit address, 32-bit size), base vertex 0x110, compute 0x310, pixel 0x510 (the hull / domain stages' bases were never seen)
+#   c0 base + 0x10 r: storage buffer r (64-bit address, 32-bit size), base vertex 0x110, compute 0x310, geometry 0x410, pixel 0x510 (0x100 per hardware stage from
+#   vertex B; the hull / domain stages' bases were never seen). Geometry: NieR:Automata's index-build geometry shaders (IndexBuildIndependent_*.gso) read their counter
+#   and index storage buffers at c0 0x410 / 0x430; without a slot they did not load, and the model draws that take their counts drew nothing
 TEX_BASE, IMG_BASE, IMG_SLOTS, SEPTEX_BASE, SEPTEX_SLOT0, SAMP_BASE = 0x20, 0x120, 8, 0x168, 128, 0x568
-SSBO = {'vs': 0x110, 'cs': 0x310, 'ps': 0x510}
+SSBO = {'vs': 0x110, 'cs': 0x310, 'gs': 0x410, 'ps': 0x510}
 
 def records(d):
     r = [m.start() for m in re.finditer(b'BTCDBTCD', d)]
@@ -484,7 +486,7 @@ def reflect(key, stage, msl, res):
                 e['fetch1d'] = True
                 if re.search(r'\b%s\.get_width\(' % re.escape(nm), msl): e['fetch1d_size'] = True   # also size-queried: a texture buffer of more than 16384 elements reports 16384 there
         binds.append(e)
-    # Storage buffers: SPIR-V binding number → c0 offset → NVN storage buffer slot (c0 base: vertex 0x110, compute 0x310, pixel 0x510, 0x10 per slot)
+    # Storage buffers: SPIR-V binding number → c0 offset → NVN storage buffer slot (c0 base: vertex 0x110, compute 0x310, geometry 0x410, pixel 0x510, 0x10 per slot)
     base = SSBO.get(stage)   # storage buffer base for the hull / domain stages has not been measured: a storage buffer there is reported with no slot
     sb_sorted = sorted(res['sbufs'], key=lambda b: b['binding'])
     for e in binds:
@@ -787,7 +789,10 @@ def geometry_finish(key, w, j, c1):
             spv = os.path.join(w, k + '.reader.spv'); dmsh_geometry.flatten_sets(spv)
             r = subprocess.run(['spirv-cross', *XC, spv], capture_output=True, text=True)
             if r.returncode: return 'geometry reader failed', r.stderr.strip()[:160], None
-            reader = vs_layer(vs_init(precise(r.stdout)))
+            # The reader passes every geometry output on, the viewport mask too (SPIR-V built-in 5253, ViewportMaskNV), which SPIRV-Cross writes as a copy into an undeclared array, so the
+            # library did not compile (NieR:Automata's IndexBuildIndependent_*.gso). Metal draws to one viewport, so the mask has nothing to select: the copy is dropped
+            reader = re.sub(r'^[ \t]*spvArrayCopyFromStackToStack\(gl_BuiltIn_5253, [^;\n]*\);\n', '', r.stdout, flags=re.M)
+            reader = vs_layer(vs_init(precise(reader)))
             analysis, full = vs_depth(reader)
             meta = {'key': key + '_bgv', 'route': 'B', 'chain': CHAIN, 'dm_ctl': key,
                     'stage': 'vs', 'entry': 'main0', 'entry_z': 'main0_z', 'msl_entry_kind': 'vertex',
