@@ -107,6 +107,9 @@ static class SwshXlate
         public int QueryComputeSharedMemorySize() => _job["shared"] is JsonNode n ? (int)n : 0;   // the shared memory size in the compute shader's control section (shader_split.py)
         static AttributeType Attr(string s) => s switch { "sint" => AttributeType.Sint, "uint" => AttributeType.Uint, _ => AttributeType.Float };
         public bool QueryGeometryInputFixed() => _job["geometry_topology"] != null;
+        // Metal has no passthrough geometry stage (NV_geometry_shader_passthrough): a geometry shader run as compute emits its input primitive itself (EmitterContext.PrepareForReturn).
+        // NieR:Automata's index-build shaders draw the depth prepass this way; answered "supported", they emitted nothing and the models never drew
+        public bool QueryHostSupportsGeometryShaderPassthrough() => _job["geometry_topology"] == null;
         public GpuGraphicsState QueryGraphicsState()
         {
             Array32<AttributeType> attr = default; Array8<AttributeType> fout = default;

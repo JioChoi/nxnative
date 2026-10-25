@@ -70,19 +70,29 @@ static size_t nvn_geo_assemble(int prim, const uint32_t *src, size_t count, int 
 // One ordered compaction per draw. Output is a point/line/triangle list, so it
 // does not depend on Metal primitive-restart behaviour. Preserve triangle-strip
 // winding and the last vertex. Unwritten GS index slots are UINT_MAX.
+// One threadgroup: each thread counts a run of GS groups, the runs' offsets are
+// scanned in threadgroup memory, then each thread writes its run in order. A single
+// thread doing it all took 120 of 123 ms of NieR:Automata's flight frame on an M-series Mac.
 static const char k_nvn_geo_pack_msl[] =
 "#include <metal_stdlib>\nusing namespace metal;\n"
 "struct geo_pack { device const uint *src; device uint *dst; device uint *args; uint groups, stride, topology, capacity; };\n"
-"kernel void geo_pack_indices(constant geo_pack& j [[buffer(0)]]) {\n"
-" uint outn=0;\n"
-" for(uint g=0;g<j.groups;g++) { uint a=0,b=0,n=0;\n"
-"  for(uint i=0;i<j.stride;i++) { uint v=j.src[g*j.stride+i];\n"
-"   if(v==0xffffffffu) {n=0;continue;}\n"
-"   if(j.topology==1) {if(outn<j.capacity) j.dst[outn++]=v;}\n"
-"   else if(j.topology==6) {if(n && outn+2<=j.capacity) {j.dst[outn++]=b;j.dst[outn++]=v;}}\n"
-"   else if(n>=2 && outn+3<=j.capacity) {j.dst[outn++]=(n&1)?b:a;j.dst[outn++]=(n&1)?a:b;j.dst[outn++]=v;}\n"
-"   a=b;b=v;n++;\n"
-"  }\n"
+"static uint geo_group(constant geo_pack& j, uint g, uint o, bool w) { uint a=0,b=0,n=0;\n"
+" for(uint i=0;i<j.stride;i++) { uint v=j.src[g*j.stride+i];\n"
+"  if(v==0xffffffffu) {n=0;continue;}\n"
+"  if(j.topology==1) {if(w && o<j.capacity) j.dst[o]=v; o++;}\n"
+"  else if(j.topology==6) {if(n) {if(w && o+2<=j.capacity) {j.dst[o]=b;j.dst[o+1]=v;} o+=2;}}\n"
+"  else if(n>=2) {if(w && o+3<=j.capacity) {j.dst[o]=(n&1)?b:a;j.dst[o+1]=(n&1)?a:b;j.dst[o+2]=v;} o+=3;}\n"
+"  a=b;b=v;n++;\n"
 " }\n"
-" j.args[0]=outn;j.args[1]=1;j.args[2]=0;j.args[3]=0;j.args[4]=0;\n"
+" return o;\n"
+"}\n"
+"kernel void geo_pack_indices(constant geo_pack& j [[buffer(0)]], uint t [[thread_position_in_threadgroup]], uint nt [[threads_per_threadgroup]]) {\n"
+" threadgroup uint base[1025];\n"
+" uint per=(j.groups+nt-1)/nt, g0=min(t*per,j.groups), g1=min(g0+per,j.groups), o=0;\n"
+" for(uint g=g0;g<g1;g++) o=geo_group(j,g,o,false);\n"
+" base[t]=o; threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+" if(t==0) {uint s=0; for(uint i=0;i<nt;i++) {uint c=base[i]; base[i]=s; s+=c;} base[nt]=s;}\n"
+" threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+" o=base[t]; for(uint g=g0;g<g1;g++) o=geo_group(j,g,o,true);\n"
+" if(t==0) {j.args[0]=min(base[nt],j.capacity);j.args[1]=1;j.args[2]=0;j.args[3]=0;j.args[4]=0;}\n"
 "}\n";

@@ -751,11 +751,13 @@ def geometry_finish(key, w, j, c1):
     Resources retain logical NVN stage 2 even though Metal executes a kernel.
     """
     code = open(j['code'], 'rb').read()
-    w2, w3, w4 = struct.unpack_from('<3I', code, 8)
+    w0, = struct.unpack_from('<I', code, 0); w2, w3, w4 = struct.unpack_from('<3I', code, 8)
     nv, inv, topology = w4 & 4095, w2 >> 24, w3 >> 24 & 15
-    if topology not in (1, 6, 7) or not nv or not inv:
+    # A passthrough shader (SPH bit 24) emits its input primitive (the translator's emulation, Program.cs): as many vertices as that has, as a list of its own class, whatever the SPH declares
+    # (NieR:Automata's IndexBuildIndependent_*.gso declare one vertex of a triangle strip)
+    passthrough = w0 >> 24 & 1
+    if not passthrough and (topology not in (1, 6, 7) or not nv) or not inv:
         return 'geometry failed', 'invalid output declaration', None
-    nidx = nv * 2  # one restart after every emitted vertex, including incomplete strips
     jobs = [{**j, 'key': key + '_g' + str(t), 'geometry_topology': t} for t in range(5)]
     jp = os.path.join(w, key + '_geometry.json'); atomic_json(jp, jobs)
     rx = subprocess.run([XLATE, jp, w], capture_output=True, text=True)
@@ -768,6 +770,8 @@ def geometry_finish(key, w, j, c1):
         if r.returncode: return 'geometry MSL failed', r.stderr.strip()[:160], None
         src = dmsh_geometry.topology_pointer(precise(r.stdout))
         res = json.load(open(os.path.join(w, k + '.res.json')))
+        if passthrough: nv, topology = (1, 2, 2, 3, 3)[t], (1, 6, 6, 7, 7)[t]
+        nidx = nv * 2  # one restart after every emitted vertex, including incomplete strips
         refl = {'key': key + '_bg' + str(t), 'route': 'B', 'chain': CHAIN, 'dm_ctl': key,
                 'source': f'{loc[key][0]}#{loc[key][1]}', 'pc_paired': pc_of[key], 'stage': 'gs',
                 'entry': 'main0', 'msl_entry_kind': 'kernel', 'threadgroup_size': [32, 1, 1],
@@ -790,7 +794,8 @@ def geometry_finish(key, w, j, c1):
             r = subprocess.run(['spirv-cross', *XC, spv], capture_output=True, text=True)
             if r.returncode: return 'geometry reader failed', r.stderr.strip()[:160], None
             # The reader passes every geometry output on, the viewport mask too (SPIR-V built-in 5253, ViewportMaskNV), which SPIRV-Cross writes as a copy into an undeclared array, so the
-            # library did not compile (NieR:Automata's IndexBuildIndependent_*.gso). Metal draws to one viewport, so the mask has nothing to select: the copy is dropped
+            # library did not compile (NieR:Automata's IndexBuildIndependent_*.gso). Metal draws to one viewport, so the mask has nothing to select: the copy is dropped (a mask of 0, which draws
+            # nothing, is taken where the shader emits its primitive: EmitterContext.PrepareForReturn)
             reader = re.sub(r'^[ \t]*spvArrayCopyFromStackToStack\(gl_BuiltIn_5253, [^;\n]*\);\n', '', r.stdout, flags=re.M)
             reader = vs_layer(vs_init(precise(reader)))
             analysis, full = vs_depth(reader)

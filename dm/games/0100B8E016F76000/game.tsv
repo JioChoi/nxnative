@@ -6,8 +6,8 @@
 # CRIWARE file system, Wwise sound, Havok, Enlighten.
 # RomFS: 30 CRI CPK archives (6.2 GB, entries CRILAYLA-compressed) of PlatinumGames DAT archives, loose USM movies (3.5 GB) and Wwise streams. The shaders are 1,371 shader
 # files of the engine's older layout (.vso / .pso / .gso / .cso: no magic, a binding table, the code area and the control section), all in five DATs of data000.cpk: shader.dat,
-# shader2.dat, shadereff.dat, shadereffcs.dat and autoshadereff.dat (shader_split.py cpk_jobs, pg_shader_old); 1,225 distinct keys, all build but the 4 geometry shaders
-# (IndexBuildIndependent_{b,x}{cw,ccw}.gso), which Metal cannot express; two of them are bound in the prologue, with no visible effect so far
+# shader2.dat, shadereff.dat, shadereffcs.dat and autoshadereff.dat (shader_split.py cpk_jobs, pg_shader_old); 1,225 distinct keys, all build; the 4 geometry shaders
+# (IndexBuildIndependent_{b,x}{cw,ccw}.gso, passthrough: the depth prepass and each mesh's culled index list) as compute kernels
 
 # ---- Identity ----
 title_id	0100B8E016F76000
