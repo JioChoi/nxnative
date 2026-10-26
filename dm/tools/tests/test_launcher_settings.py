@@ -12,6 +12,7 @@ settings = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(settings)
 
 BOTW, WONDER = '01007EF00011E000', '010015100B514000'
+NIER = '010056B015FE8000'
 PERFORMANCE_NVN = ['DM_PRESENT_SNAP', 'DM_PSO_MTL4', 'DM_PSO_PREBUILD', 'DM_NVN_ENC_THREAD', 'DM_FPS_HOLD', 'DM_METAL_HUD']
 
 
@@ -61,6 +62,14 @@ class LauncherSettingsTests(unittest.TestCase):
         self.assertEqual(build(BOTW, 'nvn', 'ios').keys(), ios.keys())   # ios when unset
         self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS'})
         self.assertIn('DM_RUMBLE', mac); self.assertIn('DM_METAL_HUD', mac)
+
+    def test_nier_frame_rate_and_dynamic_resolution_are_editable_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(settings.nacp, 'languages', return_value=['en-US']), patch.dict(os.environ, {'GFXAPI': 'nvn'}):
+            Path(tmp, 'main.fixups.tsv').write_text('# DYNAMIC_RESOLUTION\t1\n', encoding='utf-8')
+            rows = {s['env']: s for s in settings.build(NIER, tmp, Path(tmp) / 'control.nacp')['settings']}
+        self.assertEqual(rows['DM_FPS_TARGET']['default'], '60')
+        self.assertEqual(rows['DM_FPS_TARGET']['options'], [['30', '30 fps'], ['60', '60 fps']])
+        self.assertEqual((rows['DM_DYNAMIC_RESOLUTION']['kind'], rows['DM_DYNAMIC_RESOLUTION']['default']), ('toggle', '0'))
 
     def test_table_format_is_strict(self):
         good = 'DM_X\ttoggle\t-\t0\talways\tGame\tX\n'
