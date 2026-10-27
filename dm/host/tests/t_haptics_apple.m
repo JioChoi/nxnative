@@ -26,7 +26,8 @@
 @property TestPlayer *testPlayer;
 @property int starts, stops;
 @property BOOL fail;
-@property BOOL failPattern, failPlayer, failSend, handlersAtStart, resetDuringStart;
+@property BOOL failPattern, failPlayer, failSend, handlersAtStart, resetDuringStart, failAdvanced;
+@property int advancedCalls, plainCalls;
 @property(copy) void (^startingReset)(void);
 @end
 @implementation TestEngine
@@ -39,7 +40,13 @@
 }
 - (void)stopWithCompletionHandler:(CHHapticCompletionHandler)handler { self.stops++; if (handler) handler(nil); }
 - (id<CHHapticAdvancedPatternPlayer>)createAdvancedPlayerWithPattern:(CHHapticPattern *)p error:(NSError **)e {
+    (void)p; self.advancedCalls++;
+    if (self.failAdvanced) { if (e) *e = [NSError errorWithDomain:NSCocoaErrorDomain code:4097 userInfo:nil]; return nil; }
+    return (id)[self createPlayerWithPattern:p error:e];
+}
+- (id<CHHapticPatternPlayer>)createPlayerWithPattern:(CHHapticPattern *)p error:(NSError **)e {
     (void)p; (void)e; if (self.failPattern) return nil;
+    self.plainCalls++;
     self.testPlayer = [TestPlayer new]; self.testPlayer.failStart = self.failPlayer; self.testPlayer.failSend = self.failSend;
     return (id)self.testPlayer;
 }
@@ -169,6 +176,23 @@ int main(void) { @autoreleasepool {
     assert(split2.haptics.attempts == 3 && [asked[1] isEqual:GCHapticsLocalityLeftHandle] && [asked[2] isEqual:GCHapticsLocalityRightHandle]);
     assert(fabsf(split2.haptics.engines[1].testPlayer.levels.lastObject.floatValue - 0.3f) < 1e-6f);
     assert(fabsf(split2.haptics.engines[2].testPlayer.levels.lastObject.floatValue - 0.4f) < 1e-6f);
+    // A helper that refuses advanced players (NSCocoaErrorDomain 4097) gets plain ones on the same handle,
+    // asked for once, and renewed when their pattern runs out.
+    TestEngine *refusing = [TestEngine new]; refusing.failAdvanced = YES;
+    dispatch_sync(queue, ^{
+        channels[0] = [NSMutableArray new];
+        add_engine(0, @"test plain", ^CHHapticEngine *(NSError **e) { (void)e; return (id)refusing; });
+        dm_haptics_route(0, 1);
+    }); drain();
+    send_pair(0.6, 0.6);
+    assert(refusing.advancedCalls == 1 && refusing.plainCalls == 1 && !refusing.testPlayer.loopEnabled);
+    assert(fabsf(refusing.testPlayer.levels.lastObject.floatValue - sqrtf(0.72f)) < 1e-6f);
+    send_pair(0, 0); usleep(1100000); drain(); send_pair(0.5, 0.5);
+    assert(refusing.advancedCalls == 1 && refusing.plainCalls == 2);   // after idle release: plain at once
+    TestPlayer *expiring = refusing.testPlayer;
+    dispatch_sync(queue, ^{ channels[0][0].endsAt = 0; });
+    send_pair(0.4, 0.4);
+    assert(expiring.stops == 1 && refusing.plainCalls == 3 && refusing.testPlayer.levels.count == 1);
     dm_haptics_apple_controller(0, nil); drain();   // disconnect discards the controller factory and its old callbacks
     assert(!(dm_haptics_available() & 1));
     TestController *unsupported = [TestController new]; unsupported.haptics = [TestHaptics new];
@@ -176,5 +200,5 @@ int main(void) { @autoreleasepool {
     dm_haptics_apple_controller(0, (id)unsupported); drain();
     assert(!(dm_haptics_available() & 1) && unsupported.haptics.attempts == 0);
     dm_haptics_apple_shutdown();
-    puts("Apple haptics: channels, pulses, idle release, startup handlers, engine replacement, backoff and stale callbacks passed");
+    puts("Apple haptics: channels, pulses, idle release, startup handlers, engine replacement, backoff, stale callbacks and plain players passed");
 } }
