@@ -47,6 +47,7 @@ resolution: $(B)/t_resolution
 	@for fps in 0 30 60; do for mode in 0 1 unset invalid; do $(B)/t_resolution $$mode $$fps native || exit 1; done; done
 	$(B)/t_resolution 1 60 old
 	$(B)/t_resolution 1 30 wrong
+	@for fps in 0 30 60; do for mode in 0 1; do $(B)/t_resolution $$mode $$fps asia || exit 1; done; done
 run: resolution
 run: $(B)/t_symbols
 $(B)/t_symbols: t_symbols.c ../hle.c ../loader.c ../hle.h ../dm.h $(GAME_H) | $(B)

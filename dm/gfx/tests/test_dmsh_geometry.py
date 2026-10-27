@@ -12,7 +12,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
-import dmsh_geometry
+import dmsh_geometry, dmsh_mesh
 
 RASTER_CHECK = r'''#import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -231,6 +231,162 @@ class PassthroughCompiler(unittest.TestCase):
             if os.environ.get('DM_TEST_GEOMETRY'):
                 r = subprocess.run([os.environ['DM_TEST_GEOMETRY'], '--passthrough-kernels', d], capture_output=True, text=True)
                 self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+
+
+LEAN_KERNEL = '''struct _22 { float _m0[1]; };
+struct spvDescriptorSetBuffer0
+{
+    device _22* vertex_output [[id(1)]];
+    device _22* geometry_vb_output [[id(2)]];
+    device uint* gp_s0 [[id(4)]];
+};
+kernel void main0(constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0)]], uint3 gl_GlobalInvocationID [[thread_position_in_grid]])
+{
+    spvUnsafeArray<float, 134> _41;
+    int _10 = int(gl_GlobalInvocationID.x);
+    int _12 = _10 * 144;
+    int _14 = _12 + 36;
+    float _16 = (*spvDescriptorSet0.vertex_output)._m0[_14];
+    int _18 = _10 * 144;
+    int _20 = _18 + 17;
+    float _22 = (*spvDescriptorSet0.vertex_output)._m0[_20];
+    _41[17] = _22;
+    int _24 = _10 * 144;
+    float _26 = (*spvDescriptorSet0.vertex_output)._m0[_24];
+    _41[0] = _26;
+    _41[5] = as_type<float>(as_type<uint>(_16) & 1u);
+    uint _28 = atomic_fetch_add_explicit((device atomic_uint*)spvDescriptorSet0.gp_s0, 1u, memory_order_relaxed);
+    int _30 = _10 * 134;
+    float _32 = _41[0];
+    (*spvDescriptorSet0.geometry_vb_output)._m0[_30] = _32;
+    int _34 = _30 + 5;
+    float _36 = _41[5];
+    (*spvDescriptorSet0.geometry_vb_output)._m0[_34] = _36;
+    int _38 = _30 + 17;
+    float _40 = _41[17];
+    (*spvDescriptorSet0.geometry_vb_output)._m0[_38] = _40;
+}
+'''
+
+
+class LeanPassthrough(unittest.TestCase):
+    def test_passthrough_bit(self):
+        self.assertTrue(dmsh_geometry.passthrough(geometry_header()))
+        self.assertFalse(dmsh_geometry.passthrough(geometry_header(False)))
+        self.assertFalse(dmsh_geometry.passthrough(b''))
+
+    def test_lean_keeps_mask_and_decision_reads(self):
+        src, reads = dmsh_geometry.lean(LEAN_KERNEL, 134)
+        self.assertEqual(reads, [36])   # word 17 and the position only fed the copy
+        self.assertIn('int _12 = _10 * 1;', src)
+        self.assertIn('int _14 = _12 + 0;', src)
+        self.assertIn('int _34 = _10;', src)   # one mask word per output vertex
+        self.assertEqual(src.count('geometry_vb_output)._m0['), 1)
+        self.assertNotIn('_m0[_20]', src)
+        self.assertNotIn('_m0[_24]', src)
+        self.assertIn('atomic_fetch_add_explicit', src)   # storage writes stay even when unused
+
+    def test_lean_rejects_unknown_shapes(self):
+        cases = [('(*spvDescriptorSet0.geometry_vb_output)._m0[_34] = _36;', '(*spvDescriptorSet0.geometry_vb_output)._m0[_10 + 5] = _36;', 'unknown output store'),
+                 ('int _14 = _12 + 36;', 'int _14 = _12 + _10;', 'computed capture read'),
+                 ('int _34 = _30 + 5;', 'int _34 = _30 + 6;', 'no viewport mask store')]
+        for old, new, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                dmsh_geometry.lean(LEAN_KERNEL.replace(old, new), 134)
+
+    def test_capture_writes_each_word_once_through_its_slot(self):
+        src = '''struct main0_out
+{
+    float4 m_3 [[user(locn3)]];
+    float4 gl_Position [[position]];
+};
+vertex main0_out main0(uint vid [[vertex_id]])
+{
+    main0_out out = {};
+    return out;
+}
+'''
+        out = dmsh_geometry.capture(src)
+        self.assertIn('short slot[144]', out)
+        self.assertEqual(out.count('dm_cw(dm_gs, dm_p,'), 144)
+        self.assertIn('dm_cw(dm_gs, dm_p, 0, as_type<uint>(out.gl_Position.x));', out)
+        self.assertIn('dm_cw(dm_gs, dm_p, 28, as_type<uint>(out.m_3.x));', out)
+        self.assertIn('dm_cw(dm_gs, dm_p, 4, 0x3f800000u);', out)   # point size
+        self.assertIn('dm_cw(dm_gs, dm_p, 23, 0x3f800000u);', out)   # an unwritten attribute's w
+        self.assertIn('dm_cw(dm_gs, dm_p, 20, 0u);', out)
+        self.assertIn('* dm_gs.stride)', out)
+
+MESH_VS = """#include <metal_stdlib>
+using namespace metal;
+
+struct spvDescriptorSetBuffer0
+{
+    constant float4* c [[id(0)]];
+};
+
+struct main0_out
+{
+    float4 m_1 [[user(locn5)]];
+    float4 gl_Position [[position, invariant]];
+    float gl_PointSize [[point_size]];
+};
+
+struct main0_in
+{
+    float4 m_0 [[attribute(0)]];
+};
+
+vertex main0_out main0(main0_in in [[stage_in]], constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0)]])
+{
+    main0_out out = {};
+    out.m_1 = in.m_0;
+    out.gl_PointSize = 1.0;
+    out.gl_Position = in.m_0 * spvDescriptorSet0.c[0];
+    return out;
+}
+
+vertex main0_out main0_z(main0_in in [[stage_in]], constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0)]])
+{
+    main0_out out = {};
+    out.m_1 = in.m_0;
+    out.gl_PointSize = 1.0;
+    out.gl_Position = in.m_0;
+    return out;
+}
+"""
+MESH_HEAD = """#include <metal_stdlib>
+using namespace metal;
+template<typename T, size_t Num>
+struct spvUnsafeArray
+{
+    T elements[Num ? Num : 1];
+    thread T& operator [] (size_t pos) thread { return elements[pos]; }
+};
+"""
+
+
+class MeshPassthrough(unittest.TestCase):
+    def test_compose(self):
+        lean, reads = dmsh_geometry.lean(LEAN_KERNEL, 134)
+        src = dmsh_mesh.compose(MESH_VS, MESH_HEAD + '\n' + lean, reads)
+        self.assertIn('[[mesh]] void dm_mesh(', src)
+        self.assertIn('[[mesh]] void dm_mesh_z(', src)
+        self.assertIn('dm_rec[dm_t * 1u + 0u] = as_type<float>(dm_o.m_1.x);', src)   # word 36 = location 5 x
+        self.assertIn('dm_mask = as_type<uint>(_36);', src)
+        self.assertNotIn('spvDescriptorSet0.vertex_output', src)
+        self.assertNotIn('[[point_size]]', src)
+        self.assertIn('dm_ix + uint(dm_d.base_vertex)', src)
+        if shutil.which('xcrun') and sys.platform == 'darwin':
+            with tempfile.TemporaryDirectory() as d:
+                Path(d, 'm.metal').write_text(src)
+                r = subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', '-fmodules-cache-path=' + d + '/modules', str(Path(d, 'm.metal')), '-o', str(Path(d, 'm.air'))], capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+
+    def test_compose_rejects_clip_z(self):
+        lean, _ = dmsh_geometry.lean(LEAN_KERNEL, 134)
+        with self.assertRaisesRegex(ValueError, 'clip z'):
+            dmsh_mesh.compose(MESH_VS, MESH_HEAD + lean, [2])
 
 
 if __name__ == '__main__':

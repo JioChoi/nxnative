@@ -3,6 +3,7 @@
 #pragma once
 #include <stdint.h>
 #include <stddef.h>
+#include <string.h>
 
 static int nvn_geo_topology(int prim) {
     switch (prim) {
@@ -21,6 +22,12 @@ static int nvn_geo_width(int topology) { static const int width[] = {1, 2, 4, 3,
 static size_t nvn_geo_assemble(int prim, const uint32_t *src, size_t count, int restart, uint32_t restart_index, uint32_t *dst, size_t capacity) {
     int width = nvn_geo_width(nvn_geo_topology(prim));
     if (!width) return SIZE_MAX;
+    if (!restart && (prim == 0 || prim == 1 || prim == 4 || prim == 10 || prim == 12)) {   // lists: the map is the indices up to the last whole primitive
+        size_t words = count / (size_t)width * (size_t)width;
+        if (dst && words > capacity) return SIZE_MAX;
+        if (dst) memcpy(dst, src, words * sizeof *src);
+        return words;
+    }
     if (dst) {
         size_t needed = nvn_geo_assemble(prim, src, count, restart, restart_index, NULL, 0);
         if (needed == SIZE_MAX || needed > capacity) return SIZE_MAX;
@@ -100,6 +107,36 @@ static const char k_nvn_geo_pack_msl[] =
 " if(t==0){ulong total=sums[nt-1];uint w=j.topology==1?1u:j.topology==6?2u:3u,n=total<=j.capacity?uint(total):j.capacity-j.capacity%w;\n"
 " j.args[0]=n;j.args[1]=1;j.args[2]=0;j.args[3]=0;j.args[4]=0;}\n"
 "}\n"
-"kernel void geo_pack_write(constant geo_pack& j [[buffer(0)]], uint g [[thread_position_in_grid]]) { if(g<j.groups) geo_group(j,g,true,j.cnt[g]); }\n";
+"kernel void geo_pack_write(constant geo_pack& j [[buffer(0)]], uint g [[thread_position_in_grid]]) { if(g<j.groups) geo_group(j,g,true,j.cnt[g]); }\n"
+// A lean passthrough kernel (dmsh_geometry.lean) writes only each output vertex's viewport mask. geo_lean_cull drops the
+// vertices whose bit 0 is clear before compaction, as the reader's clip-plane cull would; geo_lean_index then turns the
+// packed output vertex numbers into the draw's own vertex indices (output vertex g * n + k is input vertex k of primitive g:
+// the primitive map's word) and sets the base instance, so the game's vertex shader draws them.
+"struct geo_lean { device uint *raw; device const uint *mask; device const uint *map; device uint *dst; device uint *args; uint groups, stride, first, first_instance, capacity, collapse; };\n"
+"kernel void geo_lean_cull(constant geo_lean& j [[buffer(0)]], uint g [[thread_position_in_grid]]) {\n"
+" if(g>=j.groups) return;\n"
+" for(uint i=0;i<j.stride;i++){uint v=j.raw[g*j.stride+i]; if(v!=0xffffffffu && !(j.mask[v]&1u)) j.raw[g*j.stride+i]=0xffffffffu;}\n"
+"}\n"
+// geo_lean_tri: for triangle input a passthrough group emits at most its own triangle, so no compaction is needed: each group writes its slot
+// (3 g .. 3 g + 2) with the draw's own vertex indices when all three vertices are emitted with mask bit 0 set, else a triangle collapsed onto
+// one vertex of the draw (collapse), which makes no fragments. map + first is the vertex index: first is the draw's lowest vertex for a
+// normalized map, its base vertex for a map of the raw indices (geo_draw_). The slots keep the compacted order; the raster is a direct draw of 3 x groups indices.
+"kernel void geo_lean_tri(constant geo_lean& j [[buffer(0)]], uint g [[thread_position_in_grid]]) {\n"
+" if(g>=j.groups) return;\n"
+" uint v[3]={0,0,0},n=0; bool keep=true;\n"
+" for(uint i=0;i<j.stride;i++){uint x=j.raw[g*j.stride+i]; if(x==0xffffffffu){if(n) break; continue;} if(n<3) v[n]=x; n++;}\n"
+" keep=n==3; for(uint k=0;k<3&&keep;k++) keep=(j.mask[v[k]]&1u)!=0u;\n"
+" for(uint k=0;k<3;k++) j.dst[3*g+k]=keep?j.map[v[k]]+j.first:j.collapse;\n"
+"}\n"
+"kernel void geo_lean_index(constant geo_lean& j [[buffer(0)]], uint i [[thread_position_in_grid]]) {\n"
+" if(i==0) j.args[4]=j.first_instance;\n"
+" if(i<j.args[0] && i<j.capacity) j.dst[i]=j.map[j.dst[i]]+j.first;\n"
+"}\n";
+typedef struct { uint64_t raw, mask, map, dst, args; uint32_t groups, stride, first, first_instance, capacity, collapse; } nvn_geo_lean_job;
+// The capture's record description (dmsh_geometry.capture dm_geometry_capture), vertex buffer 13: where the records go,
+// {first vertex, vertices, first instance, instances}, the record's words, and each capture word's slot in it (-1: not stored)
+enum { GEO_CAPTURE_WORDS = 144 };
+typedef struct { uint64_t dst, pad; uint32_t info[4]; uint32_t stride; int16_t slot[GEO_CAPTURE_WORDS]; } nvn_geo_capture;
+_Static_assert(__builtin_offsetof(nvn_geo_capture, info) == 16 && __builtin_offsetof(nvn_geo_capture, stride) == 32 && __builtin_offsetof(nvn_geo_capture, slot) == 36, "dm_geometry_capture layout");
 // The job record geo_pack reads (host side): the counts / offsets buffer holds a word per group
 typedef struct { uint64_t src, dst, args; uint32_t groups, stride, topology, capacity; uint64_t cnt; } nvn_geo_pack_job;

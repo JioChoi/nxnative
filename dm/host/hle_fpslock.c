@@ -66,13 +66,23 @@ static int rd(uint64_t a, void *out, size_t n) { vm_size_t got = 0; return a >= 
 // NieR 1.0.3 exposes its preset minimum but ships fixed mode-specific fallbacks.
 // Keep the native current-scale and UV controller intact; only select its
 // verified lower bound. This is independent of the FPS choice.
+// The 1.0.3 builds the rewrite cuts (patches.py): the scale clamp and the publish branch that are checked, the two fallback floors the cuts
+// replace, and the preset minimum. The Asian release (0100B8E016F76000) shifts the function by 0x13c0; its preset minimum is the target of the
+// relocation of the slot the function loads it through (main+0x12c8500).
+// display is the game's display object: its first word points to the NVN device (the present interval at +0x9c160), and +0x504 is the frame-interval
+// mode (0: 60 fps, 1: 30 fps) the setter main+0x9c0590 (Asian release; the global's 0x13c0 before) writes; in the Asian release it is the target of the
+// relocation of the slot that setter reads (main+0x12c2d18).
+static const struct { const char *build; uint32_t clamp, publish, floor0, floor1, minimum, display; } k_nier_dr[] = {
+    {"3c10ec35c5ef4c3686b4053afb0e58e7", 0x9bf568, 0x9bf578, 0x9bf528, 0x9bf534, 0x128e068, 0x192be00},
+    {"98397a10419894652f372d4dc1b6fc2c", 0x9c0928, 0x9c0938, 0x9c08e8, 0x9c08f4, 0x128f130, 0x192d600},
+};
 static void dynamic_resolution_tick(void) {
-    static int state = -1, dynamic;
+    static int state = -1, dynamic, row;
     static uint8_t *base;
     if (state < 0) {
         state = 0;
-        for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main") &&
-            !strcmp(g_mod[i].build_id, "3c10ec35c5ef4c3686b4053afb0e58e7")) base = g_mod[i].base;
+        for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main"))
+            for (int k = 0; k < (int)(sizeof k_nier_dr / sizeof *k_nier_dr); k++) if (!strcmp(g_mod[i].build_id, k_nier_dr[k].build)) { base = g_mod[i].base; row = k; }
         if (!base) return;
         const char *e = getenv("DM_DYNAMIC_RESOLUTION");
         if (e && strcmp(e, "0") && strcmp(e, "1")) LOG("[RED] DM_DYNAMIC_RESOLUTION=%s: must be 0 or 1; keeping full resolution", e);
@@ -80,8 +90,8 @@ static void dynamic_resolution_tick(void) {
         if (dynamic) {
             uint32_t clamp = 0, publish = 0;
             uint64_t floors[2] = {0};
-            if (!rd((uint64_t)(base + 0x9bf568), &clamp, 4) || !rd((uint64_t)(base + 0x9bf578), &publish, 4) ||
-                !rd((uint64_t)(base + 0x9bf528), &floors[0], 8) || !rd((uint64_t)(base + 0x9bf534), &floors[1], 8) ||
+            if (!rd((uint64_t)(base + k_nier_dr[row].clamp), &clamp, 4) || !rd((uint64_t)(base + k_nier_dr[row].publish), &publish, 4) ||
+                !rd((uint64_t)(base + k_nier_dr[row].floor0), &floors[0], 8) || !rd((uint64_t)(base + k_nier_dr[row].floor1), &floors[1], 8) ||
                 clamp != 0x1e254c80u || publish != 0x54000489u ||
                 floors[0] != 0x72a7f00c5280000cull || floors[1] != 0x72a7f00c5280000cull) {
                 LOG("[RED] dynamic resolution needs a verified native scale/UV rewrite; keeping full resolution");
@@ -93,7 +103,7 @@ static void dynamic_resolution_tick(void) {
     }
     if (!state) return;
     uint32_t cur[2];
-    uint64_t a = (uint64_t)(base + 0x128e068);
+    uint64_t a = (uint64_t)(base + k_nier_dr[row].minimum);
     if (!rd(a, cur, sizeof cur)) return;
     uint32_t minimum = dynamic ? 0x3f333333u : 0x3f800000u;
     if (cur[0] != minimum) {
@@ -110,12 +120,12 @@ static void dynamic_resolution_tick(void) {
 
 void dm_fps_lock_tick(void) {
     dynamic_resolution_tick();   // separate from the FPS cap
-    static int state = -2, rows[NLOCKS], nrow, nlog[NLOCKS], target, nier; static uint8_t *base; static const char *src;
+    static int state = -2, rows[NLOCKS], nrow, nlog[NLOCKS], target, nier; static uint8_t *base; static const char *src; static uint32_t display;
     if (state == -1) return;
     if (state == -2) {
         state = -1;
         for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) {
-            if (!strcmp(g_mod[i].build_id, "3c10ec35c5ef4c3686b4053afb0e58e7")) { base = g_mod[i].base; nier = 1; }
+            for (int k = 0; k < (int)(sizeof k_nier_dr / sizeof *k_nier_dr); k++) if (!strcmp(g_mod[i].build_id, k_nier_dr[k].build)) { base = g_mod[i].base; nier = 1; display = k_nier_dr[k].display; }
             for (int k = 0; k < NLOCKS; k++) if (!strcmp(g_mod[i].build_id, k_locks[k].build)) { rows[nrow++] = k; base = g_mod[i].base; }
         }
         if (!nrow && !nier) return;
@@ -130,12 +140,12 @@ void dm_fps_lock_tick(void) {
         uint64_t p = 0;
         static int nlog_nier;
         uint32_t want = (uint32_t)(60 / target), want_mode = want - 1, cur_mode = 0;
-        if (rd((uint64_t)(uintptr_t)(base + 0x192c304), &cur_mode, sizeof cur_mode) && cur_mode != want_mode && (cur_mode == 0 || cur_mode == 1)) {
-            uint32_t *dst = (uint32_t *)(uintptr_t)(base + 0x192c304);
+        if (rd((uint64_t)(uintptr_t)(base + display + 0x504), &cur_mode, sizeof cur_mode) && cur_mode != want_mode && (cur_mode == 0 || cur_mode == 1)) {
+            uint32_t *dst = (uint32_t *)(uintptr_t)(base + display + 0x504);
             dm_guest_write_prepare(dst, sizeof *dst);
             __atomic_store_n(dst, want_mode, __ATOMIC_RELAXED);
         }
-        if (rd((uint64_t)(uintptr_t)(base + 0x192be00), &p, sizeof p) && p) {
+        if (rd((uint64_t)(uintptr_t)(base + display), &p, sizeof p) && p) {
             uint64_t a = p + 0x9c160; uint32_t cur = 0;
             if (rd(a, &cur, sizeof cur) && cur != want && (cur == 1 || cur == 2)) {
                 uint32_t *dst = (uint32_t *)(uintptr_t)a;
