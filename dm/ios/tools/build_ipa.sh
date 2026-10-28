@@ -155,10 +155,17 @@ APP=$DD/Build/Products/Release-iphoneos/DmIOS.app
 rm -rf "$APP/msl" "$O/Payload"   # Payload/: what the copy-and-zip packing left behind, as was out.ipa (and its index) unless it is the IPA packed here, which a repeat pack reuses
 [ "$O/out.ipa" -ef "$OUT_IPA" ] || rm -f "$O/out.ipa"; [ "$O/out.ipa.idx" -ef "$OUT_IPA.idx" ] || rm -f "$O/out.ipa.idx"
 P=Payload/DmIOS.app
-if [ -f "$ROMFS" ]; then MAPS=("$P/romfs.img=$ROMFS"); else MAPS=("$P/romfs=$ROMFS"); fi
+# DM_COPY_ROMFS=NO: the game files stay out of the IPA, as in stage_resources.sh (main.m takes Documents/romfs.img, copied there once: docs/development.md, Quick reinstalls)
+if [ "${DM_COPY_ROMFS:-YES}" = NO ]; then MAPS=(); t "RomFS left out (DM_COPY_ROMFS=NO): copy it to Documents/romfs.img"
+elif [ -f "$ROMFS" ]; then MAPS=("$P/romfs.img=$ROMFS"); else MAPS=("$P/romfs=$ROMFS"); fi
 if [ -n "$AOC" ] && [ -d "$AOC" ]; then MAPS+=("$P/aoc=$AOC"); t "add-on content: $(ls "$AOC" | tr '\n' ' ')"; fi
 if [ -n "${PSO:-}" ]; then MAPS+=("$P/pso=$PSO"); fi
-MAPS+=("$P/msl/$MSLDIR=$MSL_IOS/$MSLDIR" "$P=$APP")
+# DM_COPY_SHADERS=NO: only the libraries' stamp goes in, the libraries go to Documents/msl once (scripts/push_shaders.sh; main.m takes them when their stamp matches this one)
+if [ "${DM_COPY_SHADERS:-YES}" = NO ]; then
+    [ -f "$MSL_IOS/$MSLDIR/inputs.tsv" ] || die "DM_COPY_SHADERS=NO needs stamped shader libraries ($MSL_IOS/$MSLDIR/inputs.tsv)"
+    MAPS+=("$P/msl/$MSLDIR/inputs.tsv=$MSL_IOS/$MSLDIR/inputs.tsv"); t "shader libraries left out (DM_COPY_SHADERS=NO): scripts/push_shaders.sh <UDID> <bundle ID> $MSL_IOS/$MSLDIR"
+else MAPS+=("$P/msl/$MSLDIR=$MSL_IOS/$MSLDIR"); fi
+MAPS+=("$P=$APP")
 t "pack IPA (already-compressed game files stored, everything else deflated)"
 # The pulling vertex libraries (<key>_bp, dm/gfx/tools/dmsh_pull.py) serve the hybrid pipelines. Default to the same pso_mtl4 setting compiled by gen_build.py; IOS_PULL=0 / 1 overrides it.
 # The pipeline archive's bases are made of them, so an IPA with an archive (pso/) always carries them, whatever IOS_PULL says (an Xcode build copies them always).

@@ -99,7 +99,22 @@ static int boot_env(void) {
     setenv("DM_TEMP", [doc stringByAppendingPathComponent:@"temp"].fileSystemRepresentation, 0);
     NSString *dm = [res stringByAppendingPathComponent:@"dm"];
     setenv("DM_NVN_SHMAP", [dm stringByAppendingPathComponent:@"shader_map.tsv"].fileSystemRepresentation, 0);
-    setenv("DM_MSL_DIR", [res stringByAppendingPathComponent:@"msl"].fileSystemRepresentation, 0);
+    // Shader libraries: Documents/<dir>.img (one image file, scripts/push_shaders.sh) when it holds the libraries the app was built for: its inputs.tsv equals the app's msl/<dir>/inputs.tsv.
+    // An IPA built with DM_COPY_SHADERS=NO carries only that stamp; an image cut off partway (its index comes last) or of another build is not taken, and the app's own msl is used
+    NSString *msl = [res stringByAppendingPathComponent:@"msl"], *img = nil;
+    for (NSString *d in [fm contentsOfDirectoryAtPath:msl error:nil]) {
+        NSData *want = [NSData dataWithContentsOfFile:[[msl stringByAppendingPathComponent:d] stringByAppendingPathComponent:@"inputs.tsv"]];
+        romfs_img *m = want ? romfs_image_open((img = [doc stringByAppendingPathComponent:[d stringByAppendingString:@".img"]]).fileSystemRepresentation) : NULL;
+        int64_t k = m ? romfs_image_find(m, "inputs.tsv") : -1;
+        NSMutableData *have = k >= 0 && m->e[k].type ? [NSMutableData dataWithLength:(NSUInteger)m->e[k].b] : nil;
+        int match = have && romfs_image_read(m->fd, have.mutableBytes, have.length, (off_t)m->e[k].a) && [have isEqual:want];
+        romfs_image_close(m);
+        if (match) {   // the host reads <DM_MSL_DIR>/<dir>.img (nvn_mtl.m); kept out of device backups like the RomFS
+            msl = doc; [[NSURL fileURLWithPath:img] setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:nil]; break;
+        }
+    }
+    fprintf(stderr, "boot: shader libraries %s\n", msl.fileSystemRepresentation);
+    setenv("DM_MSL_DIR", msl.fileSystemRepresentation, 0);
     setenv("DM_FONT_DIR", [dm stringByAppendingPathComponent:@"font"].fileSystemRepresentation, 0);   // Shared-font stand-ins (standard.ttf / nintendo_ext.ttf): iOS lacks the macOS font path
     NSString *aoc = [res stringByAppendingPathComponent:@"aoc"];   // add-on content: build_ipa.sh puts the RomFS extracted from the player's DLC NSPs at <App>/aoc/<index>/
     if ([fm fileExistsAtPath:aoc]) setenv("DM_AOC_DIR", aoc.fileSystemRepresentation, 0);

@@ -340,7 +340,10 @@ A full install sends the whole app, about 11 GB for Animal Crossing: New Horizon
 
 PR #368 reports Animal Crossing's app shrinking from 11 GB to 1.2 GB, with reinstalls in 30 to 60 seconds. Deleting the app deletes its `Documents`, so push the game files again after a delete. The copy needs one `devicectl` transfer at a time.
 
-The unsigned IPA build still uses the repository's `dm/ios/DmIOS.xcodeproj`, skips the resource phase (`DM_COPY_GAME_RESOURCES=NO`) and packs the resources straight from the drive as before.
+The unsigned IPA build still uses the repository's `dm/ios/DmIOS.xcodeproj`, skips the resource phase (`DM_COPY_GAME_RESOURCES=NO`) and packs the resources straight from the drive. It reads two environment variables (through the NSP script too, for example `DM_COPY_ROMFS=NO DM_COPY_SHADERS=NO python3 scripts/build_ipa_from_nsp.py …`):
+
+- `DM_COPY_ROMFS=NO` leaves the RomFS out, as above. Copy `<title ID>_build/extract/<version>/RomFS.img` to `Documents/romfs.img` once, with `xcrun devicectl device copy to … --domain-type appDataContainer --source <image> --destination Documents/romfs.img` or from the Finder's Files tab.
+- `DM_COPY_SHADERS=NO` leaves the shader libraries out, all but their stamp (`msl/b-<chain>/inputs.tsv`). `scripts/push_shaders.sh <device UDID> <bundle ID> "<NSP folder>/<title ID>_build/shader/ios/b-<chain>"` packs them into one image (`romfs_image.py`, the RomFS image format; a folder of 55,000 files timed out the phone's file service) and copies it to `Documents/b-<chain>.img`. `main.m` takes it only when it is complete and its `inputs.tsv` equals the app's stamp, so after a chain or profile change, or a cut-off copy, it uses the app's own libraries (none, in such an IPA: push again). The host reads each library from the image as a file mapping (`nvn_mtl.m` `msl_read`), and takes `<DM_MSL_DIR>/b-<chain>.img` on the Mac too. The pipeline archive stays in the app. Breath of the Wild: 1.1 GB without the RomFS, 242 MB without the shaders too, nearly all of it the pipeline archive (`--gpu` picks the phone's GPU; `none` leaves it out).
 
 ## Port another game
 

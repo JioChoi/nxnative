@@ -18,6 +18,7 @@
 #include <os/proc.h>   // os_proc_available_memory: for the memory readout line
 #endif
 #include "nvn_mtl.h"
+#include "../../host/romfs_image.h"
 #include "nvn_obj.h"
 #include "../tex/nvn_fmt_mtl.h"
 #include "../tex/nvn_deswizzle.h"
@@ -3365,6 +3366,8 @@ static os_unfair_lock g_rmu = OS_UNFAIR_LOCK_INIT;
 // ---------- Shader mapping table: Switch control section hash → PC metallib (produced by dm/gfx/tools/shader_map.py) ----------
 static NSMutableDictionary<NSString *, NSString *> *g_shmap;
 static NSString *g_shmap_path, *g_msl_dir;
+static romfs_img *g_msl_img;   // non-NULL: the libraries are one image file, <g_msl_dir>.img (dm/tools/romfs_image.py): one file copies to an iPhone at full speed, a folder of 55,000 does not (scripts/push_shaders.sh)
+static dispatch_data_t msl_read(NSString *path, NSError **err);
 static NSString *exe_rel(const char *rel) {
     char buf[4096]; uint32_t n = sizeof buf;
     if (_NSGetExecutablePath(buf, &n)) return nil;
@@ -3388,10 +3391,15 @@ static void shmap_load(void) {
     const char *m = getenv("DM_MSL_DIR");
     // Library directory = <DM_MSL_DIR or default cache>/b-<translation chain version>: the version comes from dm/gfx/nvn/dmsh_chain.h (tools/dmsh_chain.py), one for every game; a host built from an old source tree only accepts libraries of the old version
     g_msl_dir = [NSString stringWithFormat:@"%@/b-%s", m ? @(m) : [NSString stringWithFormat:@"%s%s/build/cache/metal_shader_cache", getenv("DM_ROOT") ?: getenv("HOME"), getenv("DM_ROOT") ? "" : "/dm-work"], DMSH_CHAIN];
-    if (![NSFileManager.defaultManager fileExistsAtPath:g_msl_dir]) MLOG("[RED] shader library directory %s does not exist: translation chain version %s of this source tree has not been built yet (dm/gfx/tools/dmsh_build.py)", g_msl_dir.UTF8String, DMSH_CHAIN);
+    if ([NSFileManager.defaultManager fileExistsAtPath:[g_msl_dir stringByAppendingString:@".img"]]) {   // the image wins over a folder beside it (one left from a folder copy)
+        g_msl_img = romfs_image_open([g_msl_dir stringByAppendingString:@".img"].fileSystemRepresentation);
+        if (g_msl_img) MLOG("shader libraries: image %s.img, %llu entries", g_msl_dir.UTF8String, (unsigned long long)g_msl_img->n);
+        else MLOG("[RED] shader library image %s.img is not a complete image (copied in part? errno=%d)", g_msl_dir.UTF8String, errno);
+    } else if (![NSFileManager.defaultManager fileExistsAtPath:g_msl_dir]) MLOG("[RED] shader library directory %s does not exist: translation chain version %s of this source tree has not been built yet (dm/gfx/tools/dmsh_build.py)", g_msl_dir.UTF8String, DMSH_CHAIN);
     // The library's stamp (inputs.tsv, written by a full dmsh_build.py run): the game and the digest of the profile inputs it was built from. The chain version is the same for every
     // game and every state of a profile's tables, so the stamp is what ties c1_full.tsv / cb_extent.tsv to these libraries: each names the inputs of the library it was made from
-    NSString *stamp = [NSString stringWithContentsOfFile:[g_msl_dir stringByAppendingPathComponent:@"inputs.tsv"] encoding:NSUTF8StringEncoding error:nil], *st_game = nil, *st_inputs = nil;
+    NSData *stamp_d = (NSData *)msl_read([g_msl_dir stringByAppendingPathComponent:@"inputs.tsv"], nil);
+    NSString *stamp = stamp_d ? [[NSString alloc] initWithData:stamp_d encoding:NSUTF8StringEncoding] : nil, *st_game = nil, *st_inputs = nil;
     for (NSString *ln in [stamp componentsSeparatedByString:@"\n"]) {
         NSArray *c = [ln componentsSeparatedByString:@"\t"];
         if (c.count == 2 && [c[0] isEqual:@"game"]) st_game = c[1]; else if (c.count == 2 && [c[0] isEqual:@"inputs"]) st_inputs = c[1];
@@ -3537,16 +3545,33 @@ static void pso_user_record(const char *fmt, ...) {
     if (!s || [g_pso_user_seen containsObject:s]) return;
     [g_pso_user_seen addObject:s]; fputs(line, f); fflush(f);
 }
+// A file of the shader library folder, or of its image (g_msl_img), as a read-only file mapping: newLibraryWithData keeps the mapping, not a descriptor, and the pages stay clean (file-backed).
+// Also the reflection JSON and the stamp, as NSData (dispatch_data_t is one). An image entry is mapped from the page its data starts in
+static dispatch_data_t msl_read(NSString *path, NSError **err) {
+    int fd = -1, own = 1; off_t off = 0; size_t len = 0; struct stat st;
+    NSString *pre = [g_msl_dir stringByAppendingString:@"/"];
+    if (g_msl_img && [path hasPrefix:pre]) {
+        int64_t k = romfs_image_find(g_msl_img, [path substringFromIndex:pre.length].UTF8String);
+        if (k >= 0 && g_msl_img->e[k].type && g_msl_img->e[k].b) { fd = g_msl_img->fd; own = 0; off = (off_t)g_msl_img->e[k].a; len = (size_t)g_msl_img->e[k].b; }
+        else errno = ENOENT;
+    } else if ((fd = open(path.fileSystemRepresentation, O_RDONLY)) >= 0) {
+        if (!fstat(fd, &st) && st.st_size > 0) len = (size_t)st.st_size; else { close(fd); fd = -1; errno = EINVAL; }
+    }
+    if (fd < 0) { if (err) *err = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"cannot open %@", path]}]; return nil; }
+    size_t lead = (size_t)(off & (off_t)(getpagesize() - 1));
+    void *m = mmap(NULL, len + lead, PROT_READ, MAP_PRIVATE, fd, off - (off_t)lead); int e = errno;
+    if (own) close(fd);
+    if (m == MAP_FAILED) { if (err) *err = [NSError errorWithDomain:NSPOSIXErrorDomain code:e userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"mmap failed %@", path]}]; return nil; }
+    return dispatch_data_create((char *)m + lead, len, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ munmap(m, len + lead); });
+}
 // Build the library from a .metallib file without permanently occupying a file descriptor: newLibraryWithURL keeps that file open for as long as the library object lives (one per game shader - of the 258 descriptors the iOS app permanently holds in a run, 213 are these,
 // while the default soft limit of an iOS process is 256; new shaders created in other acts raise it further). Here the file is mapped into memory and closed immediately, and the library is built from the in-memory data; the mapping is released when the library's data object is freed
 static __thread int t_lib_layer;
 static id<MTLLibrary> lib_from_file(NSString *path, NSError **err) {
-    int fd = open(path.fileSystemRepresentation, O_RDONLY); struct stat st;
-    if (fd < 0 || fstat(fd, &st) || st.st_size <= 0) { if (fd >= 0) close(fd); if (err) *err = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"cannot open %@", path]}]; return nil; }
-    size_t len = (size_t)st.st_size; void *m = mmap(NULL, len, PROT_READ, MAP_PRIVATE, fd, 0); close(fd);
-    t_lib_layer = m != MAP_FAILED && memmem(m, len, "render_target_array_index", 25) != NULL;   // the library's functions use the layer: for a vertex library, its output (shader_load)
-    if (m == MAP_FAILED) { if (err) *err = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"mmap failed %@", path]}]; return nil; }
-    dispatch_data_t d = dispatch_data_create(m, len, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ munmap(m, len); });
+    dispatch_data_t d = msl_read(path, err);
+    if (!d) return nil;
+    const void *p; size_t len; d = dispatch_data_create_map(d, &p, &len);   // one region already (one mapping): no copy, only its address
+    t_lib_layer = memmem(p, len, "render_target_array_index", 25) != NULL;   // the library's functions use the layer: for a vertex library, its output (shader_load)
     return [g_dev newLibraryWithData:d error:err];
 }
 // NVN depth mode (nvnDeviceSetDepthMode): every vertex library has two entry points (dmsh_build.py vs_depth): main0 rewrites z for the GL convention (near = -w, NVN's default),
@@ -3582,7 +3607,7 @@ static MTL4FunctionDescriptor *fn4_of(id<MTLFunction> f) {
 // layer: a vertex shader's layer entry points (entry_layer / entry_layer_z, which also write the layer) instead of main0 / main0_z, for a program whose geometry shader is a slice writer (prog_fold_gs)
 static NvShader *shader_load(NSString *pc, int stage, int layer) {
     NSError *e = nil;
-    NSData *jd = [NSData dataWithContentsOfFile:[NSString stringWithFormat:@"%@/%@.json", g_msl_dir, pc]];
+    NSData *jd = (NSData *)msl_read([NSString stringWithFormat:@"%@/%@.json", g_msl_dir, pc], nil);
     NSDictionary *j = jd ? [NSJSONSerialization JSONObjectWithData:jd options:0 error:nil] : nil;
     if (j && stage == 2 && [j[@"gs_slice"] isKindOfClass:[NSDictionary class]] && [j[@"chain"] isEqual:@DMSH_CHAIN]) {   // a slice-writing geometry shader has no library: a stub prog_fold_gs replaces
         NvShader *o = [NvShader new]; o->stage = 2; o->lay_loc = -1; strlcpy(o->key, pc.UTF8String, sizeof o->key);
@@ -5579,7 +5604,7 @@ static MTL4FunctionDescriptor *pre_fn(id<MTLLibrary> lib, NSString *name) {   //
     if (!f.functionConstantsDictionary.count) return ld;
     MTL4SpecializedFunctionDescriptor *sd = [MTL4SpecializedFunctionDescriptor new]; sd.functionDescriptor = ld; sd.constantValues = [MTLFunctionConstantValues new]; return sd;
 }
-static NSDictionary *pre_json(NSString *key) { NSData *d = [NSData dataWithContentsOfFile:[NSString stringWithFormat:@"%@/%@_b.json", g_msl_dir, key]]; return d ? [NSJSONSerialization JSONObjectWithData:d options:0 error:nil] : nil; }
+static NSDictionary *pre_json(NSString *key) { NSData *d = (NSData *)msl_read([NSString stringWithFormat:@"%@/%@_b.json", g_msl_dir, key], nil); return d ? [NSJSONSerialization JSONObjectWithData:d options:0 error:nil] : nil; }
 // The base of one pair as the draws make it (pso_desc_pull / pso_desc), or nil when the pair is left to the draws. Call inside an autorelease pool
 static MTL4RenderPipelineDescriptor *pre_desc(NSString *vk, NSString *fk, int zero) {
     NSDictionary *vj = pre_json(vk), *fj = pre_json(fk);

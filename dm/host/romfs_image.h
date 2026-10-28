@@ -70,3 +70,27 @@ bad: {
     errno = e; return NULL;
     }
 }
+// The entry a path names in an image: each component is a binary search of its directory's children, which the packer sorted by name (bytes, a shorter prefix first)
+static inline int64_t romfs_image_find(const romfs_img *m, const char *rest) {
+    uint64_t k = 0;
+    while (*rest) {
+        while (*rest == '/') rest++;
+        if (!*rest) break;
+        const char *end = strchr(rest, '/'); if (!end) end = rest + strlen(rest);
+        size_t len = end - rest;
+        if (!(len == 1 && rest[0] == '.')) {
+            if (m->e[k].type) { errno = ENOTDIR; return -1; }
+            uint64_t lo = m->e[k].a, hi = lo + m->e[k].b; int found = 0;
+            while (lo < hi) {
+                uint64_t mid = lo + (hi - lo) / 2; const img_ent *x = &m->e[mid];
+                int c = memcmp(m->names + x->name, rest, x->nlen < len ? x->nlen : len);
+                if (!c) c = (x->nlen > len) - (x->nlen < len);
+                if (!c) { k = mid; found = 1; break; }
+                if (c < 0) lo = mid + 1; else hi = mid;
+            }
+            if (!found) { errno = ENOENT; return -1; }
+        }
+        rest = end;
+    }
+    return (int64_t)k;
+}

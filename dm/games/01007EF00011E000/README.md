@@ -184,6 +184,7 @@ Before publishing, the fixes were integrated with main's pipeline archive and GP
 
 ## Found on this game
 
+- **Resolved, off by default:** [Shader library folder transfers time out, and every install resends them](../../../docs/reference/packing.md#shader-library-folder-transfers-time-out-and-every-install-resends-them) (an IPA without the RomFS and the shaders: 242 MB with the A17 Pro pipeline archive).
 - **Resolved build guard and cache isolation; rendering cause open:** [Tested tools and compiler-specific shader caches](../../../docs/reference/shaders.md#tested-tools-and-compiler-specific-shader-caches).
 
 General host changes first needed here; each applies to every game:
